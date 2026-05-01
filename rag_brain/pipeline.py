@@ -295,6 +295,18 @@ class RAGPipeline:
         raw = load_documents(file_path)
         chunks = split_documents(raw, self.settings)
 
+        # Fail fast on empty chunk lists. Without this, downstream graph
+        # extraction reports the cryptic "no graph documents produced",
+        # and Chroma silently accepts the empty insert — neither tells
+        # the user what's actually wrong (scanned PDF, encrypted file,
+        # whitespace-only DOCX, etc.).
+        if not chunks:
+            raise RuntimeError(
+                f"{Path(file_path).name} produced 0 text chunks. The file is "
+                "likely scanned/image-only, encrypted, or empty — PDF text "
+                "extraction requires selectable text."
+            )
+
         self.last_ingest_warnings: list[str] = []
         successes = 0
         backends_tried = int(self._use_chroma) + int(self._use_neo4j)
@@ -521,13 +533,29 @@ class RAGPipeline:
                 )
             return 0
 
-        # `ignore_tool_usage=True` forces prompt-based extraction, which
-        # works with any chat model. For tool-calling-capable models
-        # (Anthropic/OpenAI/Gemini) the default path is faster + cleaner.
+        # Tool-call vs. prompt-based extraction:
+        #   - LangChain's default path uses native tool calling, which gives
+        #     clean Pydantic-validated triples.
+        #   - Ollama and HuggingFace models *technically* support tool
+        #     calling but it's flaky — many smaller checkpoints (gpt-oss,
+        #     qwen3, deepseek) pass schema validation in the constructor
+        #     yet silently return empty extractions per chunk at runtime.
+        #     The user sees ``add_graph_documents`` write `:Document` nodes
+        #     but no `:__Entity__`/`:MENTIONS` because every GraphDocument
+        #     came back empty.
+        #   - We force `ignore_tool_usage=True` for local providers so
+        #     LLMGraphTransformer uses its prompt-based path, which is
+        #     much more reliable for these models.
+        s = self.settings
+        provider = (s.graph_llm_provider or "none").lower()
+        force_prompt = provider in ("ollama", "huggingface")
         try:
-            transformer = LLMGraphTransformer(llm=llm)
+            transformer = LLMGraphTransformer(
+                llm=llm, ignore_tool_usage=force_prompt
+            )
         except TypeError:
-            transformer = LLMGraphTransformer(llm=llm, ignore_tool_usage=True)
+            # Older langchain-experimental versions may not accept the kwarg.
+            transformer = LLMGraphTransformer(llm=llm)
 
         # Fan out chunks across a thread pool. LLMGraphTransformer exposes
         # `process_response` for per-doc processing; we call it directly
@@ -548,10 +576,29 @@ class RAGPipeline:
                     graph_docs.append(fut.result())
                 except Exception as e:
                     errors.append(str(e))
+        # GraphDocument count alone is misleading — a chunk can "succeed"
+        # with zero entities/relationships extracted, in which case
+        # add_graph_documents creates a :Document node but no entities or
+        # MENTIONS edges. Sum the actual content so we can see if the LLM
+        # is silently returning empty extractions (very common with small
+        # local models that nominally support tool calling).
+        total_nodes = sum(len(g.nodes) for g in graph_docs)
+        total_rels = sum(len(g.relationships) for g in graph_docs)
         log.info(
-            "graph-extract: %d/%d chunks produced GraphDocuments (%d errors)",
-            len(graph_docs), len(chunks), len(errors),
+            "graph-extract: %d/%d chunks → %d GraphDocuments, "
+            "%d entity nodes, %d relationships (%d errors)",
+            len(graph_docs), len(chunks), len(graph_docs),
+            total_nodes, total_rels, len(errors),
         )
+        # Hard signal in the UI when extraction "succeeded" but produced
+        # empty content. Pure-graph retrieval will fail without entities,
+        # so the user needs to know to swap to a stronger model.
+        if total_nodes == 0 and graph_docs and hasattr(self, "last_ingest_warnings"):
+            self.last_ingest_warnings.append(
+                f"Graph extraction produced {len(graph_docs)} GraphDocuments "
+                f"but 0 entities — the graph LLM ({self.settings.graph_llm_model!r}) "
+                "isn't returning structured output. Try a stronger model."
+            )
 
         if errors and hasattr(self, "last_ingest_warnings"):
             self.last_ingest_warnings.append(
