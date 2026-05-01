@@ -7,13 +7,14 @@ Built as a master's project for CPSC 597 at California State University, Fullert
 ## Features
 
 - **Dual backend support** — Chroma (vector DB) + Neo4j (graph DB), usable individually or simultaneously via hybrid retrieval
-- **Multi-format ingestion** — PDF and DOCX documents with metadata preservation
+- **Knowledge-graph construction** — `LLMGraphTransformer` extracts entities and typed relationships from each chunk; Neo4j becomes a connected graph rather than flat storage
+- **Cross-encoder reranking + mode gating** — BAAI/bge-reranker-base rescores candidates after bi-encoder retrieval, and the calibrated top score gates between strict RAG mode (cite chunks) and free-form chat mode (no fabricated citations)
+- **Multi-format ingestion** — PDF and DOCX with metadata preservation
 - **Multiple chunking strategies** — fixed-size or embedding-based semantic (via `SemanticChunker`)
-- **Hybrid retrieval** — queries both backends, deduplicates overlapping chunks, returns top-k results
-- **Source attribution** — LLM answers cite chunk numbers for traceability
-- **Open-source LLMs only** — local inference via Ollama (Llama 3, Mistral, etc.) or HuggingFace Transformers (Qwen, Gemma, Falcon, etc.)
+- **Open-source LLMs** — local inference via Ollama (Llama 3, Mistral, etc.) or HuggingFace Transformers (Qwen, Gemma, Falcon, etc.); the graph-extraction LLM is configured separately and can be a smaller/faster model
 - **GPU auto-detection** — uses CUDA for embeddings when available, falls back to CPU
-- **Evaluation framework** — retrieval metrics (Precision@k, Recall@k, MRR) and generation metrics (ROUGE-L, BERTScore)
+- **React + FastAPI web UI** — polished four-step wizard (Home → Configuration → Models → Documents → Chat) with a typed REST API, plus a CLI for scripted runs
+- **Evaluation framework** — retrieval metrics (Precision@k, Recall@k, MRR) and generation metrics (ROUGE-L, BERTScore), with a benchmark runner driven by a JSON test suite
 
 ## Architecture
 
@@ -43,40 +44,100 @@ Document Loader ──► Text Chunking ───────────► Emb
 
 ## Quickstart
 
-### 1. Configure environment
+### Prerequisites
+
+- **Python 3.10+** with `pip`
+- **Node.js 18+** with `npm` (for the web UI)
+- **Neo4j 5.x with the APOC plugin installed** — only required if you'll use the `neo4j` or `both` backend. APOC is needed for `LLMGraphTransformer` writes.
+- **Ollama** — only required if `LLM_PROVIDER=ollama` is selected. Either install it locally or use the cloud-hosted models (e.g. `gpt-oss:20b-cloud`) with a signed-in account.
+
+### 1. Install Python dependencies
 
 ```bash
 cd rag-openllms
-# Edit .env with your settings (see Configuration below)
-```
-
-For `RAG_BACKEND=neo4j` or `RAG_BACKEND=both`, `NEO4J_PASSWORD` must be set.
-
-### 2. Install dependencies
-
-```bash
 pip install -r requirements.txt
 ```
 
-### 3. Start services
+### 2. Install web UI dependencies (first run only)
 
-- **Ollama** — if using `LLM_PROVIDER=ollama`, ensure it's running with your model pulled (e.g. `ollama pull llama3`)
-- **HuggingFace** — if using `LLM_PROVIDER=huggingface`, models are downloaded automatically on first run
-- **Neo4j** — ensure it's running if using `neo4j` or `both` backend
+```bash
+cd web
+npm install
+cd ..
+```
+
+### 3. Configure environment
+
+Edit `.env` in the project root. The only values that *have* to be
+set are Neo4j credentials when using the `neo4j` or `both` backend:
+
+```bash
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=your_password   # required for neo4j / both
+```
+
+Everything else (backend, chunking, models, API keys for graph LLMs)
+is picked through the web UI at runtime.
+
+### 4. Start the app
+
+**Easiest — Windows PowerShell launcher (starts both servers):**
+
+```powershell
+./start_dev.ps1
+```
+
+Then open **<http://localhost:5173/>** in your browser. Click "Let's
+get started" on the Home screen and walk through the four steps.
+
+**Manual — two terminals:**
+
+```bash
+# Terminal 1 — FastAPI backend on :8000
+python -m uvicorn api.main:app --reload --port 8000
+
+# Terminal 2 — Vite dev server on :5173 (proxies /api/* → :8000)
+cd web
+npm run dev
+```
+
+Open <http://localhost:5173/> in your browser.
+
+### 5. Production deployment (single process)
+
+Build the frontend once, then run only the FastAPI backend — it
+serves the built bundle from `web/dist/` automatically:
+
+```bash
+cd web && npm run build && cd ..
+python -m uvicorn api.main:app --port 8000
+```
+
+Open <http://localhost:8000/> in your browser.
 
 ## Usage
 
-### Streamlit UI (recommended)
+The four-step wizard walks you through everything from the browser:
 
-A 4-step wizard: **Configuration → Models → Documents → Chat**. Select backends and chunking, pick and download embedding + LLM models (with a live progress bar), ingest PDFs/DOCX, then chat with citations.
+1. **Home** — overview, click *Let's get started*.
+2. **Configuration** — pick the retrieval backend (`vector` /
+   `neo4j` / `both`), chunking strategy, top-k.
+3. **Models** — embedding model, answer LLM (Ollama or HuggingFace),
+   and (for `neo4j` / `both`) the graph-extraction LLM.
+4. **Documents** — upload PDFs / DOCXs and ingest into the
+   configured stores.
+5. **Chat** — ask questions; answers cite chunk numbers in RAG mode
+   or fall back to chat mode when no chunk is relevant enough.
 
-```bash
-streamlit run app.py
-```
+The Reset button (top-right) wipes all selections, uploaded files,
+chat history, and the cached pipeline — useful when switching
+backends or models.
 
-Opens at `http://localhost:8501`. The pipeline auto-initializes when you first ingest or send a message — no separate init step.
+## CLI
 
-### CLI
+The same pipeline is scriptable through a CLI for batch ingest /
+query / evaluation. All examples assume your virtualenv is active.
 
 ### Chroma (vector) backend
 
@@ -157,7 +218,21 @@ Drag nodes to rearrange, double-click to expand neighbors, scroll to zoom. For l
 
 ### Evaluate
 
-Use the evaluation module programmatically:
+Run a benchmark JSON file end-to-end through the pipeline and print
+per-question + aggregate Precision@k / Recall@k / MRR / ROUGE-L /
+BERTScore:
+
+```bash
+# Ingest first if you haven't
+python -m rag_brain --backend vector --ingest path/to/document.pdf
+
+# Run the benchmark (template is in eval/benchmark.example.json)
+python -m rag_brain --backend vector \
+    --evaluate eval/benchmark.example.json \
+    --evaluate-out eval/results.json
+```
+
+Or use the evaluation module programmatically:
 
 ```python
 from rag_brain.evaluation import evaluate
@@ -185,6 +260,8 @@ Options:
   --chunking {fixed,semantic}     Chunking strategy (default: fixed)
   --no-recreate                   Add to existing collection instead of rebuilding
   --show-chunks                   Print retrieved chunks as JSON after the answer
+  --evaluate BENCHMARK_JSON       Run a JSON benchmark and print metrics table
+  --evaluate-out RESULTS_JSON     Write full benchmark results to a JSON file
 ```
 
 ## Configuration
@@ -208,25 +285,45 @@ All settings are read from `.env` in the project root:
 | `EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | HuggingFace embedding model |
 | `LLM_PROVIDER` | `ollama` | `ollama` or `huggingface` |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama API URL |
-| `OLLAMA_MODEL` | `llama3` | Ollama model name |
-| `HF_MODEL` | `Qwen/Qwen2.5-1.5B-Instruct` | HuggingFace model ID |
+| `OLLAMA_MODEL` | `llama3` | Answer LLM (Ollama model name) |
+| `HF_MODEL` | `Qwen/Qwen2.5-1.5B-Instruct` | Answer LLM (HuggingFace model ID) |
+| `HF_TOKEN` | _(empty)_ | Optional HF token for gated repos; never written to disk |
+| `GRAPH_LLM_PROVIDER` | `none` | `none`, `ollama`, or `huggingface` (used only with `neo4j` / `both` backends) |
+| `GRAPH_LLM_MODEL` | _(empty)_ | Model name for the chosen graph-LLM provider |
+| `GRAPH_LLM_WORKERS` | `1` | Parallel chunks during graph extraction |
 
 ## Project Structure
 
 ```
 rag-openllms/
-├── .env                        # Configuration
-├── .streamlit/config.toml      # Streamlit theme
-├── app.py                      # Streamlit UI (4-step wizard)
-├── requirements.txt            # Dependencies
-├── rag_brain/
-│   ├── __init__.py             # Package exports + HF noise suppression
+├── .env                        # Environment-specific configuration
+├── start_dev.ps1               # PowerShell launcher (FastAPI + Vite)
+├── requirements.txt            # Python dependencies
+├── eval/                       # Benchmark templates and runner output
+├── rag_brain/                  # Core RAG package
+│   ├── __init__.py             # Package exports + HF log suppression
 │   ├── __main__.py             # CLI entry point
 │   ├── config.py               # Settings (Pydantic) + enums
-│   ├── ingestion.py            # PDF/DOCX loading + chunking strategies
+│   ├── ingestion.py            # PDF/DOCX loading + chunking
 │   ├── embeddings.py           # Embedding model init (GPU auto-detect)
-│   ├── pipeline.py             # RAGPipeline: ingest, retrieve, query
-│   └── evaluation.py           # Retrieval + generation metrics
+│   ├── pipeline.py             # RAGPipeline: ingest, retrieve, rerank, query
+│   └── evaluation.py           # Retrieval + generation metrics + benchmark runner
+├── api/                        # FastAPI backend for the web UI
+│   ├── main.py                 # Routes (/api/config, /api/ingest, /api/query, …)
+│   ├── state.py                # Process-level pipeline singleton
+│   ├── schemas.py              # Pydantic request/response shapes
+│   └── presets.py              # Embedding / LLM model preset lists
+└── web/                        # React frontend (Vite + TypeScript + Tailwind)
+    ├── index.html
+    ├── package.json
+    ├── vite.config.ts
+    ├── tailwind.config.js
+    └── src/
+        ├── main.tsx            # React entrypoint
+        ├── App.tsx             # Top-level wizard router
+        ├── lib/                # API client + shared types
+        ├── components/         # Header, Stepper, Banner, Chip, …
+        └── pages/              # Home, Configuration, Models, Documents, Chat
 ```
 
 ## Tech Stack

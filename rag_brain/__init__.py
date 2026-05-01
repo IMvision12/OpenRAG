@@ -19,7 +19,7 @@ for _name in (
 ):
     logging.getLogger(_name).setLevel(logging.ERROR)
 
-# Our own logger — prints to the terminal that launched streamlit / CLI.
+# Our own logger — prints to the terminal that launched uvicorn / CLI.
 # Override level via `RAG_LOG_LEVEL=DEBUG` for very verbose output (per-chunk
 # extraction details, raw LLM responses, etc.).
 _rag_logger = logging.getLogger("rag_brain")

@@ -1,0 +1,42 @@
+[
+  {
+    "question": "What degree is the candidate currently pursuing and at which university?",
+    "reference": "Master of Science in Computer Science at California State University, Fullerton.",
+    "relevant_sources": ["Gitesh-Resume.pdf"]
+  },
+  {
+    "question": "What programming languages does the candidate list as primary skills?",
+    "reference": "Python, Java, JavaScript, and SQL.",
+    "relevant_sources": ["Gitesh-Resume.pdf"]
+  },
+  {
+    "question": "What was the candidate's most recent internship and where?",
+    "reference": "Software engineering internship — fill in actual company and role from the resume.",
+    "relevant_sources": ["Gitesh-Resume.pdf"]
+  },
+  {
+    "question": "Which RAG framework does this project use for orchestration?",
+    "reference": "LangChain, with LangChain Experimental for SemanticChunker and LLMGraphTransformer.",
+    "relevant_sources": ["Gitesh-Resume.pdf"]
+  },
+  {
+    "question": "What graph database is used and what role does it play?",
+    "reference": "Neo4j is used for both vector storage of chunks and as a knowledge graph of entities and relationships extracted from chunks.",
+    "relevant_sources": ["Gitesh-Resume.pdf"]
+  },
+  {
+    "question": "Which embedding model is the default in this system?",
+    "reference": "sentence-transformers/all-MiniLM-L6-v2.",
+    "relevant_sources": ["Gitesh-Resume.pdf"]
+  },
+  {
+    "question": "What is the capital of France?",
+    "reference": "This question is intentionally out of corpus; the system should switch to chat mode and answer Paris without citing any chunks.",
+    "relevant_sources": []
+  },
+  {
+    "question": "Who won the 2026 FIFA World Cup?",
+    "reference": "Out of corpus; expect chat mode with no fabricated citations.",
+    "relevant_sources": []
+  }
+]

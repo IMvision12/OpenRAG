@@ -11,6 +11,28 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.vectorstores import Chroma
 from langchain_neo4j import Neo4jGraph
 from langchain_ollama import ChatOllama
+from pydantic import BaseModel, Field
+
+
+class _QueryEntities(BaseModel):
+    """Schema enforced on the graph-extraction LLM at query time.
+
+    All cloud providers we support (Anthropic, OpenAI, Gemini, OpenRouter)
+    expose tool/function calling, which LangChain's `with_structured_output`
+    uses to guarantee the model returns exactly this shape. No prompt-format
+    guessing, no key-name fallbacks.
+    """
+
+    entities: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Named entities, proper nouns, and concrete concepts mentioned "
+            "in the user's question that are likely to appear as nodes in a "
+            "knowledge graph. Skip stopwords and common words. Each entry "
+            "MUST be a plain string (the entity's display name), not an "
+            "object."
+        ),
+    )
 
 from rag_brain.config import RetrievalBackend, Settings, load_settings
 from rag_brain.embeddings import get_embeddings
@@ -771,85 +793,176 @@ class RAGPipeline:
         return self._graph_query_llm
 
     def _extract_query_entities(self, question: str) -> list[str]:
-        """Ask the graph LLM for a JSON list of entity mentions in `question`.
+        """Extract entity mentions from `question` for graph search.
 
-        Returns [] if the LLM is unavailable or output can't be parsed.
-        Failures are appended to `last_query_warnings` so the UI can surface
-        them — silent empties are the worst footgun for thesis demos.
+        Strategy (in order):
+          1. Use LangChain's `with_structured_output(_QueryEntities)`. All
+             supported cloud graph-LLM providers (Anthropic, OpenAI, Gemini,
+             OpenRouter) expose tool calling, which guarantees the model
+             returns exactly the schema we asked for. No format guessing.
+          2. If structured output isn't supported by the active LLM (older
+             local models, exotic providers), fall back to free-text JSON
+             parsing — but only as a safety net, not the primary path.
 
-        Robustness for local models:
-          - strips <think>...</think> blocks (qwen3, deepseek-r1 emit these)
-          - strips ```json ...``` markdown fences
-          - falls back to the LAST [...] block if the model wraps in prose
+        Returns [] if both paths fail. Failures are recorded in
+        `last_query_warnings` so the UI surfaces them; silent empties are
+        the worst footgun for graph-only retrieval.
         """
-        import json as _json
-        import re as _re
-
         llm = self._ensure_graph_query_llm()
         if llm is None:
             log.warning("entity-extract: no graph LLM configured; returning []")
             return []
+
+        log.info("entity-extract: question=%r", question)
+
+        # ── Primary: structured output via tool/function calling ─────────
+        entities = self._extract_entities_structured(llm, question)
+        if entities is not None:
+            entities = self._dedupe_strings(entities)
+            log.info("entity-extract: %d entities (structured): %r", len(entities), entities)
+            if not entities and hasattr(self, "last_query_warnings"):
+                self.last_query_warnings.append(
+                    "Graph LLM extracted 0 entities from the question."
+                )
+            return entities
+
+        # ── Fallback: free-text parse ────────────────────────────────────
+        entities = self._extract_entities_freetext(llm, question)
+        entities = self._dedupe_strings(entities)
+        log.info("entity-extract: %d entities (freetext fallback): %r", len(entities), entities)
+        if not entities and hasattr(self, "last_query_warnings"):
+            self.last_query_warnings.append(
+                "Graph LLM extracted 0 entities from the question."
+            )
+        return entities
+
+    @staticmethod
+    def _dedupe_strings(items: list[str]) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for s in items:
+            s = (s or "").strip()
+            if s and s not in seen:
+                seen.add(s)
+                out.append(s)
+        return out
+
+    def _extract_entities_structured(self, llm, question: str) -> list[str] | None:
+        """Try to bind a Pydantic schema to the LLM and call it.
+
+        Returns the entities list on success, or None to signal the
+        caller to fall back to free-text parsing. We return None on BOTH
+        configurations:
+          - the LLM doesn't support `with_structured_output` at all
+          - structured output was bound but the model failed to honor
+            the JSON contract at runtime (very common with smaller
+            Ollama models that don't actually have tool calling)
+        Either way the caller should retry via the free-text path,
+        which is more lenient.
+        """
+        try:
+            structured_llm = llm.with_structured_output(_QueryEntities)
+        except Exception as e:
+            log.warning("entity-extract: with_structured_output unavailable: %s", e)
+            return None
+
+        prompt = ChatPromptTemplate.from_messages([
+            (
+                "system",
+                "Extract entity mentions from the user's question for a "
+                "knowledge-graph search. Include named entities, proper "
+                "nouns, organizations, products, places, and concrete "
+                "concepts likely to appear as graph nodes. Skip stopwords "
+                "and generic common words.",
+            ),
+            ("human", "{question}"),
+        ])
+        try:
+            result: _QueryEntities = (prompt | structured_llm).invoke({"question": question})
+        except Exception as e:
+            log.warning(
+                "entity-extract: structured LLM call failed (will fall back to free-text): %s",
+                e,
+            )
+            # Return None so the caller runs the free-text path. This is
+            # the hot path for small Ollama models that nominally support
+            # tool-calling but actually emit plain text.
+            return None
+        # `result.entities` is guaranteed list[str] by Pydantic validation.
+        return list(result.entities or [])
+
+    def _extract_entities_freetext(self, llm, question: str) -> list[str]:
+        """Last-resort free-text parser for LLMs without structured output.
+
+        Asks the LLM for a JSON array of strings, parses tolerantly, and
+        flattens any nested or dict-shaped output the model emits anyway
+        by taking string-leaf values from any structure it returns.
+        """
+        import json as _json
+        import re as _re
+
         prompt = ChatPromptTemplate.from_messages(
             [("system", _QUERY_ENTITY_PROMPT), ("human", "{question}")]
         )
-        log.info("entity-extract: question=%r", question)
         try:
             raw = (prompt | llm | StrOutputParser()).invoke({"question": question})
         except Exception as e:
-            log.warning("entity-extract: LLM call failed: %s", e)
+            log.warning("entity-extract: freetext LLM call failed: %s", e)
             if hasattr(self, "last_query_warnings"):
-                self.last_query_warnings.append(f"Entity extraction LLM call failed: {e}")
+                self.last_query_warnings.append(
+                    f"Entity extraction LLM call failed: {e}"
+                )
             return []
-        log.debug("entity-extract: raw output (first 400 chars): %r", (raw or "")[:400])
 
         text = (raw or "").strip()
-        # 1. Strip reasoning blocks. qwen3/deepseek-r1 etc. emit these by
-        # default; the JSON we want comes after.
         text = _re.sub(r"<think>.*?</think>", "", text, flags=_re.DOTALL).strip()
-        # 2. Strip ```json ... ``` markdown fences.
         if text.startswith("```"):
             text = _re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=_re.MULTILINE).strip()
-        # 3. Coerce Python-set syntax `{"a", "b"}` → JSON array `["a", "b"]`.
-        # Small local models like qwen3 occasionally emit set literals where
-        # we asked for a list; both convey the same data.
-        def _coerce_sets(s: str) -> str:
-            def repl(m: _re.Match) -> str:
-                inner = m.group(1)
-                # If it looks like a real JSON object (has `"key":` pattern),
-                # leave it alone — only convert when it's clearly a set.
-                if _re.search(r'"\s*:\s*', inner):
-                    return m.group(0)
-                return "[" + inner + "]"
-            prev = None
-            while s != prev:
-                prev = s
-                s = _re.sub(r"\{([^{}]*)\}", repl, s)
-            return s
-        text = _coerce_sets(text)
 
-        items: list | None = None
-        # 4. Try strict JSON first.
+        # Find the first JSON array anywhere in the text (or the whole text
+        # if it parses as a list directly).
+        parsed = None
         try:
-            parsed = _json.loads(text)
-            if isinstance(parsed, list):
-                items = parsed
+            v = _json.loads(text)
+            if isinstance(v, list):
+                parsed = v
         except Exception:
             pass
-        # 5. Fall back to the LAST [...] block in the text — useful when the
-        # model narrates before/after the JSON. We try last-first because
-        # any inline example list would appear earlier.
-        if items is None:
-            for block in reversed(_re.findall(r"\[[^\[\]]*\]", text, flags=_re.DOTALL)):
+        if parsed is None:
+            for block in _re.findall(r"\[.*?\]", text, flags=_re.DOTALL):
                 try:
-                    parsed = _json.loads(block)
-                    if isinstance(parsed, list):
-                        items = parsed
+                    v = _json.loads(block)
+                    if isinstance(v, list):
+                        parsed = v
                         break
                 except Exception:
                     continue
-
-        if items is None:
-            preview = (raw or "")[:200].replace("\n", " ")
+        if parsed is None:
+            # Final-fallback line/comma split. Small Ollama models routinely
+            # ignore the "JSON array" instruction and return one entity per
+            # line ("GITESH CHAWDA\nFISERV") or comma-separated. Treat each
+            # non-empty trimmed segment as a candidate entity rather than
+            # giving up and returning empty.
+            segments: list[str] = []
+            for line in text.splitlines():
+                for seg in _re.split(r"[,;]", line):
+                    s = seg.strip().strip('"\'.-•* ')
+                    # Reject obvious noise (very short, all-punct, sentence-y).
+                    if (
+                        s
+                        and 1 < len(s) < 80
+                        and not s.lower().startswith(("here", "the entit", "answer", "json", "result"))
+                        and not s.endswith(":")
+                    ):
+                        segments.append(s)
+            if segments:
+                log.info(
+                    "entity-extract: free-text line-split fallback recovered %d entit%s",
+                    len(segments),
+                    "y" if len(segments) == 1 else "ies",
+                )
+                return segments
+            preview = (raw or "")[:160].replace("\n", " ")
             log.warning("entity-extract: unparseable output: %r", preview)
             if hasattr(self, "last_query_warnings"):
                 self.last_query_warnings.append(
@@ -857,32 +970,27 @@ class RAGPipeline:
                 )
             return []
 
-        # Flatten arbitrary nesting. Models occasionally emit
-        # `[["Alice", "Bob"]]` (list-of-lists) or mix scalars with sub-lists;
-        # collect every leaf string and discard structure.
+        # Generalized flattening: walk any (list / dict / scalar) tree and
+        # collect every string leaf. We don't know which dict key holds the
+        # entity name, but every string in the tree is a plausible entity
+        # candidate, so we just take all of them. Cheap, no hardcoded keys.
         out: list[str] = []
-        def _collect(x):
+        def _walk(x):
             if isinstance(x, list):
                 for y in x:
-                    _collect(y)
+                    _walk(y)
+            elif isinstance(x, dict):
+                for v in x.values():
+                    _walk(v)
+            elif isinstance(x, str):
+                s = x.strip()
+                if s:
+                    out.append(s)
             elif x is not None:
                 s = str(x).strip()
                 if s:
                     out.append(s)
-        _collect(items)
-
-        # An empty (but valid) extraction is just as fatal as a parse failure
-        # for graph retrieval — surface it so the user can see the LLM ran but
-        # found nothing.
-        if not out:
-            preview = (raw or "")[:120].replace("\n", " ")
-            log.warning("entity-extract: 0 entities; raw=%r", preview)
-            if hasattr(self, "last_query_warnings"):
-                self.last_query_warnings.append(
-                    f"Graph LLM extracted 0 entities from the question. Raw output: {preview!r}"
-                )
-        else:
-            log.info("entity-extract: %d entities: %r", len(out), out)
+        _walk(parsed)
         return out
 
     def _graph_retrieve(self, question: str, pool: int) -> list[Document]:
@@ -912,10 +1020,31 @@ class RAGPipeline:
         hops = max(0, min(int(self.settings.graph_hops or 0), 3))
         max_entities = max(1, int(self.settings.graph_max_entities or 10))
 
+        # Bidirectional + word-level substring match. The graph LLM is
+        # inconsistent about the granularity at which it stores names —
+        # it might store "Gitesh", "Mr Gitesh Chawda", "Chawda", or even
+        # "Software Engineer at Fiserv" (label-as-phrase). We can't
+        # control that, so the matcher casts a wide net:
+        #   - whole-string bidirectional CONTAINS (handles "Gitesh"
+        #     vs "Gitesh Chawda" in either direction)
+        #   - word-level: any word of length > 2 from the term that
+        #     appears in the entity id, or vice versa, also matches.
+        # This trades precision for recall, which is the right tradeoff
+        # for pure-graph retrieval — better to seed the graph traversal
+        # with too many entities than to return nothing.
         cypher = f"""
         UNWIND $terms AS term
         MATCH (e:__Entity__)
-        WHERE toLower(e.id) CONTAINS toLower(term)
+        WITH e, term,
+             toLower(e.id) AS eid_lc,
+             toLower(term) AS term_lc
+        WITH e, term, eid_lc, term_lc,
+             [w IN split(term_lc, ' ') WHERE size(w) > 2] AS term_words,
+             [w IN split(eid_lc, ' ')  WHERE size(w) > 2] AS eid_words
+        WHERE eid_lc CONTAINS term_lc
+           OR term_lc CONTAINS eid_lc
+           OR ANY(w IN term_words WHERE eid_lc CONTAINS w)
+           OR ANY(w IN eid_words  WHERE term_lc CONTAINS w)
         WITH e, count(*) AS hits
         ORDER BY hits DESC
         LIMIT $max_entities
@@ -1177,6 +1306,25 @@ def run_cli() -> None:
         action="store_true",
         help="Print retrieved chunks as JSON after the answer.",
     )
+    parser.add_argument(
+        "--evaluate",
+        type=str,
+        default=None,
+        metavar="BENCHMARK_JSON",
+        help=(
+            "Path to a benchmark JSON file. Runs every (question, reference, "
+            "relevant_sources) item through pipeline.query, computes "
+            "Precision@k / Recall@k / MRR / ROUGE-L / BERTScore, and prints "
+            "a per-question + aggregate table."
+        ),
+    )
+    parser.add_argument(
+        "--evaluate-out",
+        type=str,
+        default=None,
+        metavar="RESULTS_JSON",
+        help="Optional path to write full benchmark results as JSON.",
+    )
     args = parser.parse_args()
 
     os.environ["RAG_BACKEND"] = args.backend
@@ -1193,7 +1341,18 @@ def run_cli() -> None:
         if args.show_chunks:
             print("\n--- retrieved chunks ---")
             print(json.dumps(out["retrieved"], indent=2, ensure_ascii=False))
-    elif not args.ingest:
+
+    if args.evaluate:
+        from rag_brain.evaluation import run_benchmark, format_benchmark_report
+        results = run_benchmark(pipe, args.evaluate)
+        print(format_benchmark_report(results))
+        if args.evaluate_out:
+            from pathlib import Path
+            Path(args.evaluate_out).write_text(
+                json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            print(f"\nWrote full results to {args.evaluate_out}")
+    elif not args.ingest and not args.query:
         parser.print_help()
 
 
