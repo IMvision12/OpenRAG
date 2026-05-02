@@ -10,6 +10,11 @@ import {
   Sparkles,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+// remark-gfm enables GitHub Flavored Markdown — most importantly,
+// pipe-table syntax (| col | col |) which the gpt-oss family loves
+// to use for structured answers. Without it those tables render as
+// literal text with visible pipes instead of as actual tables.
+import remarkGfm from "remark-gfm";
 import { api } from "../lib/api";
 import { PageHeader } from "../components/PageHeader";
 import { Banner } from "../components/Banner";
@@ -194,7 +199,9 @@ function Bubble({ message }: { message: ChatMessage }) {
     <div className="flex justify-start fade-in">
       <div className="max-w-[92%] w-full card px-5 py-4 text-sm">
         <div className="md leading-relaxed">
-          <ReactMarkdown>{message.text}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            {message.text}
+          </ReactMarkdown>
         </div>
         {meta && (
           <div className="mt-4 pt-3 border-t border-border space-y-2.5 text-xs">

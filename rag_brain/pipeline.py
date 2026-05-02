@@ -111,6 +111,11 @@ def _clean_llm_output(text: str) -> str:
     # Pass 2: HTML line breaks → real newlines.
     # Matches <br>, <br/>, <br />, <BR>, etc. with optional whitespace.
     out = _re.sub(r"<\s*br\s*/?\s*>", "\n", out, flags=_re.IGNORECASE)
+    # Pass 3: Full-width CJK brackets that some models (notably the
+    # gpt-oss series) emit instead of ASCII square brackets for
+    # citations. They look like 【1】instead of [1] and the markdown
+    # renderer doesn't recognize them as bracketed text. Normalize.
+    out = out.replace("【", "[").replace("】", "]")
     # Collapse 3+ consecutive newlines down to 2 (paragraph break) so
     # the substitution above doesn't leave huge gaps.
     out = _re.sub(r"\n{3,}", "\n\n", out)
@@ -197,13 +202,18 @@ _RAG_SYSTEM_PROMPT = (
     "You are a careful research assistant for question answering over the user's documents. "
     "Answer using ONLY the provided context. For every claim you make, cite the chunk number "
     "in square brackets (e.g. [1], [3]). If the context does not contain enough information "
-    "to answer, say so explicitly. Do not make up information."
+    "to answer, say so explicitly. Do not make up information.\n\n"
+    "Format rules (strict):\n"
+    "- Reply ONLY in plain prose paragraphs. NO markdown tables under any circumstance.\n"
+    "- NO bullet lists, NO numbered lists, NO headings, NO section dividers.\n"
+    "- Use one to three short paragraphs. Plain text only, except for inline `[i]` citations."
 )
 
 _CHAT_SYSTEM_PROMPT = (
     "You are a helpful assistant. Answer the user's question naturally and concisely from "
-    "your own general knowledge. Do not mention any documents, do not fabricate citations, "
-    "and keep replies conversational."
+    "your own general knowledge. Do not mention any documents, do not fabricate citations.\n\n"
+    "Format rules (strict): reply ONLY in plain prose paragraphs. NO tables, NO bullet lists, "
+    "NO numbered lists, NO headings. One or two short paragraphs."
 )
 
 # Cross-encoder reranker. Unlike bi-encoder cosine similarity (which drifts

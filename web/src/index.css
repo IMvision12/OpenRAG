@@ -194,3 +194,29 @@ body {
 .md strong {
   color: #fff;
 }
+
+/* GFM tables: many LLMs (gpt-oss in particular) emit pipe-table
+   answers. Without explicit styling they collapse into visually
+   broken plain rows. */
+.md table {
+  border-collapse: collapse;
+  margin: 0.5rem 0 0.75rem 0;
+  font-size: 0.88em;
+  width: 100%;
+  display: block;
+  overflow-x: auto;
+}
+.md thead {
+  background: rgba(124, 138, 255, 0.08);
+}
+.md th,
+.md td {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.md th {
+  font-weight: 600;
+  color: #fff;
+}
