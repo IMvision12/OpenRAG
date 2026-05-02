@@ -76,33 +76,49 @@ def _format_context(docs: list[Document]) -> str:
     return "\n\n".join(parts)
 
 
-def _strip_thinking(text: str) -> str:
-    """Remove model reasoning blocks from chat output.
+def _clean_llm_output(text: str) -> str:
+    """Clean common LLM output artifacts before showing to the user.
 
-    Reasoning models (Qwen3, DeepSeek-R1, OpenAI o-series clones) emit
-    a ``<think>...</think>`` block before the actual answer, and many
-    of them stream the whole thing through to the user. We strip:
-      - balanced ``<think>...</think>`` (and the close-tag spelled
-        ``</think>`` on its own line)
-      - leading ``<think>`` with no closing tag (defensive, in case
-        the model truncates mid-thought due to max_new_tokens)
-    Trailing whitespace and stray newlines from the strip are cleaned
-    up so the caller doesn't have to.
+    Two passes:
+
+    1. **Reasoning blocks.** Reasoning models (Qwen3, DeepSeek-R1,
+       OpenAI o-series clones) emit ``<think>...</think>`` before the
+       actual answer; some stream the whole thing through. We strip
+       balanced blocks, lone ``</think>`` closers (chat templates
+       that swallow the opener), and lone ``<think>`` openers
+       (defensive, in case generation was truncated mid-thought).
+
+    2. **HTML line-break tags.** Some models (gpt-oss family in
+       particular) emit literal ``<br>`` / ``<br/>`` / ``<br />``
+       tags as line separators in markdown-style answers. The
+       react-markdown renderer treats these as literal text, so the
+       user sees ``... compliance with security standards. <br>
+       Reduced unauthorized access ...`` instead of a line break.
+       We normalize them to a real newline so markdown renders
+       correctly.
+
+    Trailing whitespace and collapsed runs of blank lines from the
+    cleanup are normalized too.
     """
     import re as _re
     if not text:
         return text
-    # Balanced think blocks (most common case).
+    # Pass 1: thinking blocks.
     out = _re.sub(r"<think>.*?</think>\s*", "", text, flags=_re.DOTALL | _re.IGNORECASE)
-    # Sometimes the model emits only a closing tag with no opening one
-    # (chat templates that swallow the opener). Strip everything before
-    # a lone </think>.
     if "</think>" in out.lower():
         out = _re.sub(r"^.*?</think>\s*", "", out, count=1, flags=_re.DOTALL | _re.IGNORECASE)
-    # If only an opener appears (rare; truncated generation), drop the
-    # ``<think>`` literal so it doesn't leak.
     out = _re.sub(r"<think>\s*", "", out, flags=_re.IGNORECASE)
+    # Pass 2: HTML line breaks → real newlines.
+    # Matches <br>, <br/>, <br />, <BR>, etc. with optional whitespace.
+    out = _re.sub(r"<\s*br\s*/?\s*>", "\n", out, flags=_re.IGNORECASE)
+    # Collapse 3+ consecutive newlines down to 2 (paragraph break) so
+    # the substitution above doesn't leave huge gaps.
+    out = _re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()
+
+
+# Keep the old name as an alias so nothing else in the file breaks.
+_strip_thinking = _clean_llm_output
 
 
 def _deduplicate_docs(docs: list[Document]) -> list[Document]:

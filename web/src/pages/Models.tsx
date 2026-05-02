@@ -334,9 +334,16 @@ export function ModelsPage({
           </Banner>
         </div>
       )}
-      {warmupActive && (
+      {/* Only HuggingFace actually downloads weights — Ollama just
+          opens a connection. Skip the progress card for Ollama; the
+          button's own "Loading…" state is enough. */}
+      {warmupActive && config.llm_provider === "huggingface" && (
         <div className="mt-4">
-          <WarmupProgress status={warmupStatus} hfModel={config.hf_model} provider={config.llm_provider} />
+          <WarmupProgress
+            status={warmupStatus}
+            hfModel={config.hf_model}
+            provider={config.llm_provider}
+          />
         </div>
       )}
 
