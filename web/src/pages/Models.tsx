@@ -143,6 +143,15 @@ export function ModelsPage({
                 onChange={(e) => onChange({ hf_token: e.target.value })}
                 placeholder="hf_..."
                 className="input w-full font-mono"
+                // Stop browsers from autofilling saved passwords or
+                // emails into what is actually an API-token field.
+                name="hf-access-token"
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
+                data-lpignore="true"
+                data-1p-ignore="true"
+                data-form-type="other"
               />
               <div className="text-muted text-xs mt-1.5">
                 Required only for gated models (Llama, Gemma, Mistral). Stored
@@ -295,6 +304,17 @@ function PresetCombo({
           }}
           placeholder="Type a model ID"
           className="input font-mono"
+          // Disable browser autofill — without these the password manager
+          // sees a text input next to a "password" field and fills both
+          // (e.g. drops the user's email here and a saved password into
+          // the HF token field).
+          name="custom-model-id"
+          autoComplete="off"
+          autoCorrect="off"
+          spellCheck={false}
+          data-lpignore="true"
+          data-1p-ignore="true"
+          data-form-type="other"
         />
       </div>
       {(hint || value) && (

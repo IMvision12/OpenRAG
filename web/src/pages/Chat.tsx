@@ -21,13 +21,6 @@ interface ChatMessage {
   meta?: QueryResponse;
 }
 
-const STARTERS = [
-  "Summarize the document in one paragraph.",
-  "What are the key skills mentioned?",
-  "List the most recent work experience.",
-  "What technologies are used?",
-];
-
 export function ChatPage({ onBack }: { onBack: () => void }) {
   const [history, setHistory] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -86,22 +79,10 @@ export function ChatPage({ onBack }: { onBack: () => void }) {
               <Sparkles size={20} className="text-accent" />
             </div>
             <h3 className="font-semibold mb-1">Start the conversation</h3>
-            <p className="text-muted text-sm mb-5 max-w-md mx-auto">
+            <p className="text-muted text-sm max-w-md mx-auto">
               The pipeline initializes on your first message — initial
               response may take a moment while the LLM loads.
             </p>
-            <div className="flex flex-wrap gap-2 justify-center">
-              {STARTERS.map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => send(s)}
-                  className="btn-ghost text-xs"
-                >
-                  {s}
-                </button>
-              ))}
-            </div>
           </div>
         )}
         {history.map((m, i) => (
