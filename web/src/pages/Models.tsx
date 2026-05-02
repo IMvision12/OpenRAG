@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Trash2,
@@ -18,6 +18,7 @@ import type {
   LLMProvider,
   PipelineConfig,
   Presets,
+  WarmupStatus,
 } from "../lib/types";
 
 export function ModelsPage({
@@ -46,8 +47,98 @@ export function ModelsPage({
       ? !!config.graph_llm_model
       : true);
 
+  // Warmup with live progress. Two-stage:
+  //   1. POST /api/warmup starts a background job on the server.
+  //   2. Poll GET /api/warmup/status every 250ms for byte counters and
+  //      completion. The server's tqdm hook captures HuggingFace
+  //      download progress, so the bar is real (not a spinner).
+  const [warmupActive, setWarmupActive] = useState(false);
+  const [warmupStatus, setWarmupStatus] = useState<WarmupStatus | null>(null);
+  const [warmupError, setWarmupError] = useState<string | null>(null);
+  const pollRef = useRef<number | null>(null);
+
+  function clearPoll() {
+    if (pollRef.current !== null) {
+      window.clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }
+
+  useEffect(() => clearPoll, []); // cleanup on unmount
+
+  async function startWarmup() {
+    setWarmupError(null);
+    setWarmupStatus(null);
+    setWarmupActive(true);
+    try {
+      const initial = await api.warmupStart();
+      setWarmupStatus(initial);
+    } catch (err) {
+      setWarmupActive(false);
+      setWarmupError((err as Error).message);
+      return;
+    }
+    pollRef.current = window.setInterval(async () => {
+      try {
+        const s = await api.warmupStatus();
+        setWarmupStatus(s);
+        if (s.error) {
+          clearPoll();
+          setWarmupActive(false);
+          setWarmupError(s.error);
+        } else if (s.done) {
+          clearPoll();
+          setWarmupActive(false);
+          // Small delay so the user briefly sees the 100% bar before
+          // we navigate away.
+          setTimeout(() => onNext(), 300);
+        }
+      } catch (err) {
+        clearPoll();
+        setWarmupActive(false);
+        setWarmupError((err as Error).message);
+      }
+    }, 250);
+  }
+
   return (
     <section>
+      {/*
+        Honeypot inputs to absorb browser/password-manager autofill.
+        Chrome aggressively ignores autoComplete="off" on what it
+        heuristically classifies as a sign-in form (any text input
+        followed by a password input). These two hidden fields are
+        positioned far off-screen so they're invisible and unreachable
+        via Tab, but the browser sees them first and dumps the saved
+        username/password into them instead of the real model fields.
+      */}
+      <div
+        aria-hidden="true"
+        style={{
+          position: "absolute",
+          left: "-10000px",
+          top: "auto",
+          width: 1,
+          height: 1,
+          overflow: "hidden",
+        }}
+      >
+        <input
+          type="text"
+          name="username"
+          tabIndex={-1}
+          autoComplete="username"
+          defaultValue=""
+        />
+        <input
+          type="password"
+          name="password"
+          tabIndex={-1}
+          autoComplete="current-password"
+          defaultValue=""
+        />
+      </div>
+
       <PageHeader
         step={2}
         title="Models"
@@ -143,15 +234,23 @@ export function ModelsPage({
                 onChange={(e) => onChange({ hf_token: e.target.value })}
                 placeholder="hf_..."
                 className="input w-full font-mono"
-                // Stop browsers from autofilling saved passwords or
-                // emails into what is actually an API-token field.
-                name="hf-access-token"
+                // Block browser autofill. The honeypot pair at the top
+                // of the page absorbs the password manager; these
+                // attributes are belt-and-suspenders for password
+                // managers (LastPass, 1Password, Dashlane) that bypass
+                // honeypots. The readOnly + onFocus trick is the
+                // strongest signal — Chrome won't autofill readOnly
+                // fields, and we lift the flag the moment the user
+                // actually clicks in.
+                name="hf-access-token-input"
                 autoComplete="off"
                 autoCorrect="off"
                 spellCheck={false}
                 data-lpignore="true"
                 data-1p-ignore="true"
                 data-form-type="other"
+                readOnly
+                onFocus={(e) => e.currentTarget.removeAttribute("readonly")}
               />
               <div className="text-muted text-xs mt-1.5">
                 Required only for gated models (Llama, Gemma, Mistral). Stored
@@ -228,10 +327,25 @@ export function ModelsPage({
 
       <CacheManager />
 
+      {warmupError && (
+        <div className="mt-4">
+          <Banner tone="error">
+            Could not load the LLM:{" "}
+            <span className="font-mono text-xs">{warmupError}</span>
+          </Banner>
+        </div>
+      )}
+      {warmupActive && (
+        <div className="mt-4">
+          <WarmupProgress status={warmupStatus} hfModel={config.hf_model} provider={config.llm_provider} />
+        </div>
+      )}
+
       <div className="flex justify-between mt-6">
         <button
           type="button"
           onClick={onBack}
+          disabled={warmupActive}
           className="btn-ghost inline-flex items-center gap-2"
         >
           <ArrowLeft size={16} />
@@ -239,15 +353,117 @@ export function ModelsPage({
         </button>
         <button
           type="button"
-          disabled={!ready}
-          onClick={onNext}
+          disabled={!ready || warmupActive}
+          onClick={startWarmup}
           className="btn-primary inline-flex items-center gap-2"
         >
-          Continue to Documents
-          <ArrowRight size={16} />
+          {warmupActive
+            ? config.llm_provider === "huggingface"
+              ? "Downloading model…"
+              : "Loading…"
+            : "Continue to Documents"}
+          {!warmupActive && <ArrowRight size={16} />}
         </button>
       </div>
     </section>
+  );
+}
+
+function WarmupProgress({
+  status,
+  hfModel,
+  provider,
+}: {
+  status: WarmupStatus | null;
+  hfModel: string;
+  provider: string | null;
+}) {
+  const isHF = provider === "huggingface";
+  const loaded = status?.loaded_bytes ?? 0;
+  const total = status?.total_bytes ?? 0;
+  // Indeterminate while we don't have a total yet (very first poll, or
+  // a non-byte stage like "loading weights into memory").
+  const pct = total > 0 ? Math.min(100, (loaded / total) * 100) : null;
+  const stage = status?.stage ?? "starting";
+
+  const stageLabel = (() => {
+    if (status?.error) return "Error";
+    if (status?.done) return "Ready";
+    if (stage === "downloading") {
+      return isHF ? "Downloading model" : "Downloading";
+    }
+    if (stage === "loading") return "Loading weights into memory";
+    if (stage === "starting") return "Starting…";
+    return stage;
+  })();
+
+  return (
+    <div className="card p-5">
+      <div className="flex items-baseline justify-between gap-4 mb-3 flex-wrap">
+        <div>
+          <div className="text-sm font-semibold">{stageLabel}</div>
+          {isHF && hfModel && (
+            <div className="text-muted text-xs font-mono mt-0.5">{hfModel}</div>
+          )}
+        </div>
+        <div className="text-xs text-muted font-mono">
+          {pct === null
+            ? "—"
+            : `${humanSize(loaded)} / ${humanSize(total)}  ·  ${pct.toFixed(1)}%`}
+        </div>
+      </div>
+
+      {/* Progress bar — determinate when we have bytes, animated stripe otherwise */}
+      <div className="h-2 w-full bg-bg/60 border border-border rounded-full overflow-hidden">
+        {pct === null ? (
+          <div
+            className="h-full"
+            style={{
+              width: "40%",
+              background:
+                "linear-gradient(90deg, transparent, rgba(124,138,255,0.6), transparent)",
+              animation: "warmup-shimmer 1.4s linear infinite",
+            }}
+          />
+        ) : (
+          <div
+            className="h-full transition-all duration-200 ease-out"
+            style={{
+              width: `${pct}%`,
+              background: "linear-gradient(90deg, #8c98ff, #c2a8ff)",
+            }}
+          />
+        )}
+      </div>
+
+      <div className="flex justify-between text-muted text-xs mt-2">
+        <span>
+          {status && status.files_total > 0
+            ? `File ${Math.min(status.files_done + 1, status.files_total)} of ${status.files_total}`
+            : "Initializing…"}
+        </span>
+        <span>
+          {status?.elapsed_s
+            ? `${status.elapsed_s.toFixed(0)}s elapsed`
+            : ""}
+        </span>
+      </div>
+
+      {isHF && (
+        <div className="text-muted text-xs mt-3">
+          First-time downloads can take several minutes for multi-GB models —
+          this only happens once per model. The file is cached for future runs.
+        </div>
+      )}
+
+      {/* Inline keyframes for the indeterminate stripe */}
+      <style>{`
+        @keyframes warmup-shimmer {
+          0%   { transform: translateX(-100%); }
+          100% { transform: translateX(350%); }
+        }
+      `}</style>
+    </div>
   );
 }
 
@@ -304,17 +520,18 @@ function PresetCombo({
           }}
           placeholder="Type a model ID"
           className="input font-mono"
-          // Disable browser autofill — without these the password manager
-          // sees a text input next to a "password" field and fills both
-          // (e.g. drops the user's email here and a saved password into
-          // the HF token field).
-          name="custom-model-id"
+          // See the long comment on the HF token field above. Same
+          // attack surface here — text input next to a password input
+          // = "username" to Chrome, which autofills the user's email.
+          name="custom-model-id-input"
           autoComplete="off"
           autoCorrect="off"
           spellCheck={false}
           data-lpignore="true"
           data-1p-ignore="true"
           data-form-type="other"
+          readOnly
+          onFocus={(e) => e.currentTarget.removeAttribute("readonly")}
         />
       </div>
       {(hint || value) && (

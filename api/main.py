@@ -98,6 +98,33 @@ def reset_all() -> dict[str, bool]:
     return {"ok": True}
 
 
+@app.post("/api/warmup")
+def warmup_start() -> dict[str, Any]:
+    """Kick off LLM download/load on a background thread.
+
+    Returns immediately with the initial job state. The frontend
+    polls `GET /api/warmup/status` for live byte-level progress and
+    detects completion (`done: true`) or failure (`error: "..."`).
+
+    Validates the config synchronously up front so missing fields
+    surface as a 400 right away instead of a delayed background error.
+    """
+    miss = STATE.missing_required()
+    if miss:
+        raise HTTPException(
+            status_code=400, detail="Missing required selections: " + ", ".join(miss),
+        )
+    from .warmup import start as _start
+    return _start(STATE)
+
+
+@app.get("/api/warmup/status")
+def warmup_status() -> dict[str, Any]:
+    """Live progress of the active warmup. Frontend polls every ~250ms."""
+    from .warmup import get_status
+    return get_status()
+
+
 # ─── Ingest ────────────────────────────────────────────────────────────
 
 @app.post("/api/ingest", response_model=IngestSummary)

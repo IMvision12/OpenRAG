@@ -76,6 +76,35 @@ def _format_context(docs: list[Document]) -> str:
     return "\n\n".join(parts)
 
 
+def _strip_thinking(text: str) -> str:
+    """Remove model reasoning blocks from chat output.
+
+    Reasoning models (Qwen3, DeepSeek-R1, OpenAI o-series clones) emit
+    a ``<think>...</think>`` block before the actual answer, and many
+    of them stream the whole thing through to the user. We strip:
+      - balanced ``<think>...</think>`` (and the close-tag spelled
+        ``</think>`` on its own line)
+      - leading ``<think>`` with no closing tag (defensive, in case
+        the model truncates mid-thought due to max_new_tokens)
+    Trailing whitespace and stray newlines from the strip are cleaned
+    up so the caller doesn't have to.
+    """
+    import re as _re
+    if not text:
+        return text
+    # Balanced think blocks (most common case).
+    out = _re.sub(r"<think>.*?</think>\s*", "", text, flags=_re.DOTALL | _re.IGNORECASE)
+    # Sometimes the model emits only a closing tag with no opening one
+    # (chat templates that swallow the opener). Strip everything before
+    # a lone </think>.
+    if "</think>" in out.lower():
+        out = _re.sub(r"^.*?</think>\s*", "", out, count=1, flags=_re.DOTALL | _re.IGNORECASE)
+    # If only an opener appears (rare; truncated generation), drop the
+    # ``<think>`` literal so it doesn't leak.
+    out = _re.sub(r"<think>\s*", "", out, flags=_re.IGNORECASE)
+    return out.strip()
+
+
 def _deduplicate_docs(docs: list[Document]) -> list[Document]:
     """Remove duplicate chunks based on page_content."""
     seen: set[str] = set()
@@ -1303,6 +1332,7 @@ class RAGPipeline:
             answer = (prompt | self._ensure_llm() | StrOutputParser()).invoke(
                 {"context": _format_context(docs), "question": question}
             )
+            answer = _strip_thinking(answer)
             mode = "rag"
             retrieved_docs = docs
         else:
@@ -1315,6 +1345,7 @@ class RAGPipeline:
             answer = (prompt | self._ensure_llm() | StrOutputParser()).invoke(
                 {"question": question}
             )
+            answer = _strip_thinking(answer)
             mode = "chat"
             retrieved_docs = []
 
