@@ -14,7 +14,7 @@ class PipelineConfig(BaseModel):
     complete copy on every change; the backend rebuilds the cached
     pipeline only when fields actually drift."""
 
-    backend: Literal["vector", "neo4j", "both"] | None = None
+    backend: Literal["vector", "neo4j"] | None = None
     chunking: Literal["fixed", "semantic"] = "fixed"
     top_k: int = 4
     chunk_size: int = 1200

@@ -257,13 +257,12 @@ _QUERY_ENTITY_PROMPT = (
 
 
 class RAGPipeline:
-    """End-to-end RAG with support for Chroma, Neo4j, or both simultaneously.
+    """End-to-end RAG with a single configurable backend.
 
     Backends:
-      - vector: Chroma (vector similarity)
+      - vector: Chroma similarity search.
       - neo4j:  pure knowledge-graph retrieval (entity extract → match →
-                hop expand → fetch source chunks via :MENTIONS)
-      - both:   union of the two, deduplicated and reranked together
+                hop expand → fetch source chunks via :MENTIONS).
     """
 
     def __init__(self, settings: Settings | None = None):
@@ -306,21 +305,17 @@ class RAGPipeline:
 
     @property
     def _use_chroma(self) -> bool:
-        return self.settings.retrieval_backend in (RetrievalBackend.vector, RetrievalBackend.both)
+        return self.settings.retrieval_backend == RetrievalBackend.vector
 
     @property
     def _use_neo4j(self) -> bool:
-        return self.settings.retrieval_backend in (RetrievalBackend.neo4j, RetrievalBackend.both)
+        return self.settings.retrieval_backend == RetrievalBackend.neo4j
 
     # ── Ingestion ──────────────────────────────────────────────────────
 
     def ingest(self, file_path: Path | str, *, recreate: bool = True) -> int:
-        """Load a document (PDF/DOCX), chunk, embed, and store. Returns chunk count.
-
-        When both backends are enabled, a failure in one is recorded in
-        `self.last_ingest_warnings` instead of aborting — so a missing Neo4j
-        server doesn't block Chroma from working (and vice versa).
-        """
+        """Load a document (PDF/DOCX), chunk, embed, and store in the
+        active backend. Returns chunk count."""
         raw = load_documents(file_path)
         chunks = split_documents(raw, self.settings)
 
@@ -337,32 +332,14 @@ class RAGPipeline:
             )
 
         self.last_ingest_warnings: list[str] = []
-        successes = 0
-        backends_tried = int(self._use_chroma) + int(self._use_neo4j)
 
         if self._use_chroma:
-            try:
-                self._ingest_chroma(chunks, recreate=recreate)
-                successes += 1
-            except Exception as e:
-                if backends_tried > 1:
-                    self.last_ingest_warnings.append(f"Chroma ingest failed: {e}")
-                else:
-                    raise
-
-        if self._use_neo4j:
-            try:
-                self._ingest_neo4j(chunks, recreate=recreate)
-                successes += 1
-            except Exception as e:
-                if backends_tried > 1:
-                    self.last_ingest_warnings.append(f"Neo4j ingest failed: {e}")
-                else:
-                    raise
-
-        if successes == 0:
+            self._ingest_chroma(chunks, recreate=recreate)
+        elif self._use_neo4j:
+            self._ingest_neo4j(chunks, recreate=recreate)
+        else:
             raise RuntimeError(
-                "All backends failed: " + " | ".join(self.last_ingest_warnings)
+                f"Unknown backend {self.settings.retrieval_backend!r}"
             )
 
         return len(chunks)
@@ -1185,36 +1162,19 @@ class RAGPipeline:
     # ── Retrieval ──────────────────────────────────────────────────────
 
     def _retrieve_candidates(self, question: str, pool: int) -> list[Document]:
-        """Retrieve up to `pool` unscored candidates per backend, dedupe.
+        """Retrieve up to `pool` unscored candidates from the active backend.
 
-        This is the first stage of the two-stage retrieve-then-rerank
-        pipeline. We pull more than top_k here so the reranker has recall
-        room; it will pick the truly relevant ones.
+        First stage of the two-stage retrieve-then-rerank pipeline. We
+        pull more than top_k here so the reranker has recall room; it
+        will pick the truly relevant ones.
         """
-        all_docs: list[Document] = []
         self.last_query_warnings: list[str] = []
-        backends_tried = int(self._use_chroma) + int(self._use_neo4j)
-
         if self._use_chroma:
-            try:
-                store = self._ensure_chroma()
-                all_docs.extend(store.similarity_search(question, k=pool))
-            except Exception as e:
-                if backends_tried > 1:
-                    self.last_query_warnings.append(f"Chroma retrieval failed: {e}")
-                else:
-                    raise
-
+            store = self._ensure_chroma()
+            return _deduplicate_docs(store.similarity_search(question, k=pool))
         if self._use_neo4j:
-            try:
-                all_docs.extend(self._graph_retrieve(question, pool))
-            except Exception as e:
-                if backends_tried > 1:
-                    self.last_query_warnings.append(f"Neo4j graph retrieval failed: {e}")
-                else:
-                    raise
-
-        return _deduplicate_docs(all_docs)
+            return _deduplicate_docs(self._graph_retrieve(question, pool))
+        return []
 
     def _retrieve_scored_cosine(self, question: str) -> list[tuple[Document, float]]:
         """Bi-encoder cosine fallback: used when the reranker is unavailable.
@@ -1225,31 +1185,18 @@ class RAGPipeline:
         k = self.settings.top_k
         scored: list[tuple[Document, float]] = []
         self.last_query_warnings: list[str] = []
-        backends_tried = int(self._use_chroma) + int(self._use_neo4j)
 
         if self._use_chroma:
-            try:
-                store = self._ensure_chroma()
-                for d, dist in store.similarity_search_with_score(question, k=k):
-                    scored.append((d, _normalize_chroma_distance(dist)))
-            except Exception as e:
-                if backends_tried > 1:
-                    self.last_query_warnings.append(f"Chroma retrieval failed: {e}")
-                else:
-                    raise
-        if self._use_neo4j:
-            try:
-                # Pure graph hits have no native cosine score. When the
-                # cross-encoder reranker is unavailable we treat any chunk
-                # whose entity matched as presumed-relevant (score 1.0) so
-                # it isn't filtered out by the threshold gate downstream.
-                for d in self._graph_retrieve(question, k):
-                    scored.append((d, 1.0))
-            except Exception as e:
-                if backends_tried > 1:
-                    self.last_query_warnings.append(f"Neo4j graph retrieval failed: {e}")
-                else:
-                    raise
+            store = self._ensure_chroma()
+            for d, dist in store.similarity_search_with_score(question, k=k):
+                scored.append((d, _normalize_chroma_distance(dist)))
+        elif self._use_neo4j:
+            # Pure graph hits have no native cosine score. When the
+            # cross-encoder reranker is unavailable we treat any chunk
+            # whose entity matched as presumed-relevant (score 1.0) so
+            # it isn't filtered out by the threshold gate downstream.
+            for d in self._graph_retrieve(question, k):
+                scored.append((d, 1.0))
         best: dict[str, tuple[Document, float]] = {}
         for d, s in scored:
             key = d.page_content.strip()
@@ -1376,12 +1323,12 @@ def run_cli() -> None:
 
     sys.stdout.reconfigure(encoding="utf-8")
 
-    parser = argparse.ArgumentParser(description="RAG brain — vector, Neo4j, or both backends.")
+    parser = argparse.ArgumentParser(description="RAG brain — vector or graph backend.")
     parser.add_argument(
         "--backend",
-        choices=["vector", "neo4j", "both"],
-        default=os.environ.get("RAG_BACKEND", "both"),
-        help="vector = Chroma; neo4j = pure knowledge-graph retrieval; both = hybrid (Chroma vector + Neo4j graph).",
+        choices=["vector", "neo4j"],
+        default=os.environ.get("RAG_BACKEND", "vector"),
+        help="vector = Chroma similarity search; neo4j = pure knowledge-graph traversal.",
     )
     parser.add_argument(
         "--ingest",

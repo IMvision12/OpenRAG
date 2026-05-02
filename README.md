@@ -6,7 +6,7 @@ Built as a master's project for CPSC 597 at California State University, Fullert
 
 ## Features
 
-- **Dual backend support** — Chroma (vector DB) + Neo4j (graph DB), usable individually or simultaneously via hybrid retrieval
+- **Choose your backend** — Chroma (vector DB) for similarity search, or Neo4j (graph DB) for pure knowledge-graph traversal
 - **Knowledge-graph construction** — `LLMGraphTransformer` extracts entities and typed relationships from each chunk; Neo4j becomes a connected graph rather than flat storage
 - **Cross-encoder reranking + mode gating** — BAAI/bge-reranker-base rescores candidates after bi-encoder retrieval, and the calibrated top score gates between strict RAG mode (cite chunks) and free-form chat mode (no fabricated citations)
 - **Multi-format ingestion** — PDF and DOCX with metadata preservation
@@ -24,14 +24,18 @@ Document (PDF/DOCX)
 Document Loader ──► Text Chunking ───────────► Embedding Generation
                     (fixed/SemanticChunker)    (sentence-transformers)
                                             │
-                        ┌───────────────────┼───────────────────┐
+                        ┌───────────────────┴───────────────────┐
                         ▼                                       ▼
                    Chroma (vector DB)                   Neo4j (graph DB)
+                  similarity search                  entity → Cypher → :MENTIONS
                         │                                       │
                         └───────────────┬───────────────────────┘
+                                        ▼     (one backend, chosen at config)
+                              Cross-encoder Reranker
+                              (BAAI/bge-reranker-base)
+                                        │
                                         ▼
-                              Hybrid Retrieval
-                            (deduplicate + top-k)
+                              Mode gate (top score ≥ τ)
                                         │
                                         ▼
                                 LLM Generation
@@ -47,7 +51,7 @@ Document Loader ──► Text Chunking ───────────► Emb
 
 - **Python 3.10+** with `pip`
 - **Node.js 18+** with `npm` (for the web UI)
-- **Neo4j 5.x with the APOC plugin installed** — only required if you'll use the `neo4j` or `both` backend. APOC is needed for `LLMGraphTransformer` writes.
+- **Neo4j 5.x with the APOC plugin installed** — only required if you'll use the `neo4j` backend. APOC is needed for `LLMGraphTransformer` writes.
 - **Ollama** — only required if `LLM_PROVIDER=ollama` is selected. Either install it locally or use the cloud-hosted models (e.g. `gpt-oss:20b-cloud`) with a signed-in account.
 
 ### 1. Install Python dependencies
@@ -68,12 +72,12 @@ cd ..
 ### 3. Configure environment
 
 Edit `.env` in the project root. The only values that *have* to be
-set are Neo4j credentials when using the `neo4j` or `both` backend:
+set are Neo4j credentials when using the `neo4j` backend:
 
 ```bash
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=your_password   # required for neo4j / both
+NEO4J_PASSWORD=your_password   # required when backend = neo4j
 ```
 
 Everything else (backend, chunking, models, API keys for graph LLMs)
@@ -120,10 +124,10 @@ Open <http://localhost:8000/> in your browser.
 The four-step wizard walks you through everything from the browser:
 
 1. **Home** — overview, click *Let's get started*.
-2. **Configuration** — pick the retrieval backend (`vector` /
-   `neo4j` / `both`), chunking strategy, top-k.
+2. **Configuration** — pick the retrieval backend (`vector` or
+   `neo4j`), chunking strategy, top-k.
 3. **Models** — embedding model, answer LLM (Ollama or HuggingFace),
-   and (for `neo4j` / `both`) the graph-extraction LLM.
+   and (for `neo4j`) the graph-extraction LLM.
 4. **Documents** — upload PDFs / DOCXs and ingest into the
    configured stores.
 5. **Chat** — ask questions; answers cite chunk numbers in RAG mode
@@ -182,28 +186,10 @@ python -m rag_brain --backend neo4j --query "What are the key findings?"
 python -m rag_brain --backend neo4j --query "What are the key findings?" --show-chunks
 ```
 
-### Hybrid (both backends)
-
-```bash
-# Ingest into Chroma + Neo4j simultaneously
-python -m rag_brain --backend both --ingest "document.pdf"
-
-# Ingest with semantic chunking
-python -m rag_brain --backend both --ingest "report.docx" --chunking semantic
-
-# Append to both stores
-python -m rag_brain --backend both --ingest "document.pdf" --no-recreate
-
-# Query (retrieves from both, deduplicates, returns top-k)
-python -m rag_brain --backend both --query "What are the key findings?"
-
-# Query with retrieved chunks visible
-python -m rag_brain --backend both --query "What are the key findings?" --show-chunks
-```
 
 ### Explore the knowledge graph
 
-After ingesting with `neo4j` or `both`, browse the extracted entity-relation graph in **Neo4j Browser**:
+After ingesting with the `neo4j` backend, browse the extracted entity-relation graph in **Neo4j Browser**:
 
 🔗 **[http://localhost:7474](http://localhost:7474)** (default Neo4j HTTP port — same machine as the bolt URL in `.env`)
 
@@ -221,7 +207,7 @@ Drag nodes to rearrange, double-click to expand neighbors, scroll to zoom. For l
 python -m rag_brain [OPTIONS]
 
 Options:
-  --backend {vector,neo4j,both}   Retrieval backend (default: both)
+  --backend {vector,neo4j}        Retrieval backend (default: vector)
   --ingest PATH                   Path to PDF or DOCX file to ingest
   --query TEXT                    Question to ask
   --chunking {fixed,semantic}     Chunking strategy (default: fixed)
@@ -235,7 +221,7 @@ All settings are read from `.env` in the project root:
 
 | Variable | Default | Description |
 |---|---|---|
-| `RAG_BACKEND` | `both` | `vector`, `neo4j`, or `both` |
+| `RAG_BACKEND` | `vector` | `vector` or `neo4j` |
 | `CHUNKING_STRATEGY` | `fixed` | `fixed` or `semantic` |
 | `CHUNK_SIZE` | `1200` | Characters per chunk |
 | `CHUNK_OVERLAP` | `200` | Overlap between chunks |
@@ -253,7 +239,7 @@ All settings are read from `.env` in the project root:
 | `OLLAMA_MODEL` | `llama3` | Answer LLM (Ollama model name) |
 | `HF_MODEL` | `Qwen/Qwen2.5-1.5B-Instruct` | Answer LLM (HuggingFace model ID) |
 | `HF_TOKEN` | _(empty)_ | Optional HF token for gated repos; never written to disk |
-| `GRAPH_LLM_PROVIDER` | `none` | `none`, `ollama`, or `huggingface` (used only with `neo4j` / `both` backends) |
+| `GRAPH_LLM_PROVIDER` | `none` | `none`, `ollama`, or `huggingface` (used only with the `neo4j` backend) |
 | `GRAPH_LLM_MODEL` | _(empty)_ | Model name for the chosen graph-LLM provider |
 | `GRAPH_LLM_WORKERS` | `1` | Parallel chunks during graph extraction |
 

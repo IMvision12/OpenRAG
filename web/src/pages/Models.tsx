@@ -34,8 +34,7 @@ export function ModelsPage({
   onBack: () => void;
   onNext: () => void;
 }) {
-  const showGraphLLM =
-    config.backend === "neo4j" || config.backend === "both";
+  const showGraphLLM = config.backend === "neo4j";
 
   const ready =
     !!config.embedding_model &&

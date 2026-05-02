@@ -10,7 +10,6 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 class RetrievalBackend(str, Enum):
     vector = "vector"
     neo4j = "neo4j"
-    both = "both"
 
 
 class ChunkingStrategy(str, Enum):
@@ -28,9 +27,9 @@ class Settings(BaseSettings):
 
     # --- Retrieval store ---
     retrieval_backend: RetrievalBackend = Field(
-        default=RetrievalBackend.both,
+        default=RetrievalBackend.vector,
         alias="RAG_BACKEND",
-        description="vector = Chroma; neo4j = Neo4jVector; both = Chroma + Neo4j hybrid",
+        description="vector = Chroma similarity search; neo4j = pure knowledge-graph traversal",
     )
 
     # --- Chroma (vector) ---

@@ -3,8 +3,8 @@ import { ArrowRight, Database, Network, Cpu, Sparkles, FileText, MessageSquare }
 const FEATURES = [
   {
     icon: Database,
-    title: "Hybrid Retrieval",
-    desc: "Chroma vector search + Neo4j knowledge graph, deduplicated and reranked together for the best of both worlds.",
+    title: "Vector or Graph Backend",
+    desc: "Pick Chroma similarity search for fast paraphrastic queries, or Neo4j knowledge-graph traversal for relational ones.",
   },
   {
     icon: Network,
@@ -63,7 +63,7 @@ export function HomePage({ onStart }: { onStart: () => void }) {
           </span>
         </h1>
         <p className="text-muted text-lg max-w-2xl mx-auto leading-relaxed mb-9">
-          Hybrid retrieval over Chroma + Neo4j, with a connected
+          Vector or graph retrieval over Chroma or Neo4j, with a connected
           knowledge graph extracted by an LLM and answers generated
           locally through Ollama or HuggingFace.
         </p>

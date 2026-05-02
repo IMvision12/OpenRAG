@@ -44,7 +44,7 @@ class PipelineState:
             miss.append("Ollama model (Step 2)")
         elif c.llm_provider == "huggingface" and not c.hf_model:
             miss.append("HuggingFace model (Step 2)")
-        if c.backend in ("neo4j", "both") and c.graph_llm_provider != "none":
+        if c.backend == "neo4j" and c.graph_llm_provider != "none":
             if not c.graph_llm_model:
                 miss.append("Graph LLM model (Step 2)")
         return miss

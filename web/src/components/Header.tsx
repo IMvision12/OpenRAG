@@ -44,7 +44,7 @@ export function Header({
             RAG OpenLLMs
           </h1>
           <div className="text-muted text-xs">
-            Hybrid retrieval · open-source LLMs
+            Vector or graph retrieval · open-source LLMs
           </div>
         </div>
       </button>

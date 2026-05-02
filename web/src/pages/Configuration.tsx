@@ -1,4 +1,4 @@
-import { Database, Network, Layers, ArrowRight } from "lucide-react";
+import { Database, Network, ArrowRight } from "lucide-react";
 import { PageHeader, SectionHeader } from "../components/PageHeader";
 import type { Backend, Chunking, PipelineConfig } from "../lib/types";
 
@@ -19,12 +19,6 @@ const BACKENDS: {
     title: "Neo4j Graph",
     desc: "Pure knowledge-graph retrieval. Requires Neo4j, APOC, and a graph LLM.",
     icon: Network,
-  },
-  {
-    id: "both",
-    title: "Hybrid",
-    desc: "Chroma vector + Neo4j graph, deduplicated and reranked together.",
-    icon: Layers,
   },
 ];
 
@@ -52,7 +46,7 @@ export function ConfigurationPage({
           title="Retrieval backend"
           hint="Where retrieved chunks come from at query time."
         />
-        <div className="grid sm:grid-cols-3 gap-3">
+        <div className="grid sm:grid-cols-2 gap-3">
           {BACKENDS.map((b) => {
             const sel = config.backend === b.id;
             return (
@@ -83,68 +77,72 @@ export function ConfigurationPage({
         </div>
       </div>
 
-      <div className="card p-6 mb-6">
-        <SectionHeader
-          title="Chunking strategy"
-          hint="How documents are split before embedding."
-        />
-        <div className="flex gap-3 mb-6 flex-wrap">
-          {(
-            [
-              { id: "fixed" as Chunking, label: "Fixed-size", hint: "Predictable, fast" },
-              { id: "semantic" as Chunking, label: "Semantic", hint: "Embedding-aware splits" },
-            ]
-          ).map((c) => (
-            <button
-              key={c.id}
-              type="button"
-              onClick={() => onChange({ chunking: c.id })}
-              className={[
-                "flex-1 min-w-[180px] text-left p-4 rounded-xl border transition-all duration-200",
-                config.chunking === c.id
-                  ? "bg-accent-soft border-accent-border"
-                  : "bg-surface border-border hover:bg-surface-2",
-              ].join(" ")}
-            >
-              <div className="font-semibold text-sm mb-0.5">{c.label}</div>
-              <div className="text-muted text-xs">{c.hint}</div>
-            </button>
-          ))}
-        </div>
-
-        <div className="grid sm:grid-cols-3 gap-4">
-          <NumField
-            label="Top-K"
-            value={config.top_k}
-            min={1}
-            max={20}
-            onChange={(v) => onChange({ top_k: v })}
-            hint="Chunks returned per query."
+      {/* Chunking only matters once the user has chosen a backend —
+          hide the whole card until then to keep the page focused. */}
+      {config.backend && (
+        <div className="card p-6 mb-6 fade-in">
+          <SectionHeader
+            title="Chunking strategy"
+            hint="How documents are split before embedding."
           />
-          {config.chunking === "fixed" && (
-            <>
-              <NumField
-                label="Chunk size"
-                value={config.chunk_size}
-                min={200}
-                max={4000}
-                step={50}
-                onChange={(v) => onChange({ chunk_size: v })}
-                hint="Characters per chunk."
-              />
-              <NumField
-                label="Overlap"
-                value={config.chunk_overlap}
-                min={0}
-                max={1000}
-                step={20}
-                onChange={(v) => onChange({ chunk_overlap: v })}
-                hint="Overlap between adjacent chunks."
-              />
-            </>
-          )}
+          <div className="flex gap-3 mb-6 flex-wrap">
+            {(
+              [
+                { id: "fixed" as Chunking, label: "Fixed-size", hint: "Predictable, fast" },
+                { id: "semantic" as Chunking, label: "Semantic", hint: "Embedding-aware splits" },
+              ]
+            ).map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                onClick={() => onChange({ chunking: c.id })}
+                className={[
+                  "flex-1 min-w-[180px] text-left p-4 rounded-xl border transition-all duration-200",
+                  config.chunking === c.id
+                    ? "bg-accent-soft border-accent-border"
+                    : "bg-surface border-border hover:bg-surface-2",
+                ].join(" ")}
+              >
+                <div className="font-semibold text-sm mb-0.5">{c.label}</div>
+                <div className="text-muted text-xs">{c.hint}</div>
+              </button>
+            ))}
+          </div>
+
+          <div className="grid sm:grid-cols-3 gap-4">
+            <NumField
+              label="Top-K"
+              value={config.top_k}
+              min={1}
+              max={20}
+              onChange={(v) => onChange({ top_k: v })}
+              hint="Chunks returned per query."
+            />
+            {config.chunking === "fixed" && (
+              <>
+                <NumField
+                  label="Chunk size"
+                  value={config.chunk_size}
+                  min={200}
+                  max={4000}
+                  step={50}
+                  onChange={(v) => onChange({ chunk_size: v })}
+                  hint="Characters per chunk."
+                />
+                <NumField
+                  label="Overlap"
+                  value={config.chunk_overlap}
+                  min={0}
+                  max={1000}
+                  step={20}
+                  onChange={(v) => onChange({ chunk_overlap: v })}
+                  hint="Overlap between adjacent chunks."
+                />
+              </>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="flex justify-end">
         <button
