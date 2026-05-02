@@ -867,20 +867,12 @@ class RAGPipeline:
         if entities is not None:
             entities = self._dedupe_strings(entities)
             log.info("entity-extract: %d entities (structured): %r", len(entities), entities)
-            if not entities and hasattr(self, "last_query_warnings"):
-                self.last_query_warnings.append(
-                    "Graph LLM extracted 0 entities from the question."
-                )
             return entities
 
         # ── Fallback: free-text parse ────────────────────────────────────
         entities = self._extract_entities_freetext(llm, question)
         entities = self._dedupe_strings(entities)
         log.info("entity-extract: %d entities (freetext fallback): %r", len(entities), entities)
-        if not entities and hasattr(self, "last_query_warnings"):
-            self.last_query_warnings.append(
-                "Graph LLM extracted 0 entities from the question."
-            )
         return entities
 
     @staticmethod
@@ -1048,19 +1040,54 @@ class RAGPipeline:
         3. Expand `graph_hops` away through any relationship.
         4. Return the source `:Document` chunk text linked via `[:MENTIONS]`.
 
-        No vector similarity anywhere in this path. Recall depends entirely
-        on whether the question's entities exist in the graph — that's the
-        intended tradeoff for this backend.
+        When entity extraction returns nothing (paraphrastic / generic
+        questions like ``summarize the document``), we fall back to
+        returning every `:Document` chunk capped at `pool`. The
+        cross-encoder reranker downstream will reorder them by actual
+        relevance to the question, so summary-type queries still work.
+
+        No vector similarity anywhere in this path. Recall depends on
+        either matching entities in the graph or being able to fit the
+        whole document in the candidate pool — the intended tradeoff
+        for this backend.
         """
         terms = self._extract_query_entities(question)
         # Snapshot the entities for the query-time diagnostic surface (UI
         # shows "what did the graph LLM extract?" so silent failures aren't
         # mysterious).
         self.last_extracted_entities = list(terms)
-        if not terms:
-            return []
 
         graph = self._ensure_neo4j_graph()
+
+        if not terms:
+            # No entities to seed the graph traversal — fall back to
+            # returning all :Document chunks. The reranker will pick
+            # what's actually relevant to the (entity-free) question.
+            log.info("graph-retrieve: no entities extracted; falling back to all :Document chunks (pool=%d)", pool)
+            try:
+                rows = graph.query(
+                    "MATCH (d:Document) "
+                    "RETURN d.text AS text, coalesce(d.source, '?') AS source "
+                    "LIMIT $pool",
+                    params={"pool": pool},
+                )
+            except Exception as e:
+                log.warning("graph-retrieve: fallback query failed: %s", e)
+                return []
+            out: list[Document] = []
+            for r in rows:
+                t = r.get("text")
+                if t:
+                    out.append(Document(page_content=t, metadata={"source": r.get("source") or "?"}))
+            log.info(
+                "graph-retrieve: fallback returned %d :Document chunk(s)", len(out),
+            )
+            if hasattr(self, "last_query_warnings") and not out:
+                self.last_query_warnings.append(
+                    "Graph LLM extracted 0 entities and the fallback found no :Document nodes. "
+                    "Has anything been ingested into Neo4j?"
+                )
+            return out
         # Clamp hops to a sane literal range — Cypher requires variable-
         # length path bounds to be literals, so we format it into the query
         # only after validating.
@@ -1353,25 +1380,6 @@ def run_cli() -> None:
         action="store_true",
         help="Print retrieved chunks as JSON after the answer.",
     )
-    parser.add_argument(
-        "--evaluate",
-        type=str,
-        default=None,
-        metavar="BENCHMARK_JSON",
-        help=(
-            "Path to a benchmark JSON file. Runs every (question, reference, "
-            "relevant_sources) item through pipeline.query, computes "
-            "Precision@k / Recall@k / MRR / ROUGE-L / BERTScore, and prints "
-            "a per-question + aggregate table."
-        ),
-    )
-    parser.add_argument(
-        "--evaluate-out",
-        type=str,
-        default=None,
-        metavar="RESULTS_JSON",
-        help="Optional path to write full benchmark results as JSON.",
-    )
     args = parser.parse_args()
 
     os.environ["RAG_BACKEND"] = args.backend
@@ -1388,18 +1396,7 @@ def run_cli() -> None:
         if args.show_chunks:
             print("\n--- retrieved chunks ---")
             print(json.dumps(out["retrieved"], indent=2, ensure_ascii=False))
-
-    if args.evaluate:
-        from rag_brain.evaluation import run_benchmark, format_benchmark_report
-        results = run_benchmark(pipe, args.evaluate)
-        print(format_benchmark_report(results))
-        if args.evaluate_out:
-            from pathlib import Path
-            Path(args.evaluate_out).write_text(
-                json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
-            print(f"\nWrote full results to {args.evaluate_out}")
-    elif not args.ingest and not args.query:
+    elif not args.ingest:
         parser.print_help()
 
 

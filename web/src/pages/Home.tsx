@@ -36,7 +36,7 @@ const FEATURES = [
 const STATS = [
   { value: "2", label: "Storage backends" },
   { value: "10+", label: "Local LLM presets" },
-  { value: "5", label: "Evaluation metrics" },
+  { value: "4", label: "Wizard steps" },
 ];
 
 export function HomePage({ onStart }: { onStart: () => void }) {

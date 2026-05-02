@@ -90,8 +90,8 @@ export default function App() {
           : !!config.hf_model)
       );
     // Step 4 (Chat) requires at least one successful ingest. Empty-index
-    // chats produce confusing "no chunks found" results — better to keep
-    // the user on Documents until they've actually loaded something.
+    // chats produce confusing "no chunks found" results — keep the user
+    // on Documents until they've actually loaded something.
     if (n === 4) return hasIngested;
     return true;
   };

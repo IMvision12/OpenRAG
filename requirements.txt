@@ -25,10 +25,6 @@ accelerate>=0.30.0
 python-dotenv>=1.0.0
 pydantic-settings>=2.0.0
 
-# Evaluation (optional — install for metrics)
-rouge-score>=0.1.2
-bert-score>=0.3.13
-
 # UI — FastAPI backend for the React frontend (see web/)
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0

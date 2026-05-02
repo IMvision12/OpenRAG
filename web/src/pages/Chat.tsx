@@ -144,7 +144,7 @@ export function ChatPage({ onBack }: { onBack: () => void }) {
             <Send size={16} />
           </button>
         </div>
-        <div className="flex justify-between items-center mt-3">
+        <div className="flex justify-between items-center mt-3 gap-3 flex-wrap">
           <button
             type="button"
             onClick={onBack}

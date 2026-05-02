@@ -14,7 +14,6 @@ Built as a master's project for CPSC 597 at California State University, Fullert
 - **Open-source LLMs** — local inference via Ollama (Llama 3, Mistral, etc.) or HuggingFace Transformers (Qwen, Gemma, Falcon, etc.); the graph-extraction LLM is configured separately and can be a smaller/faster model
 - **GPU auto-detection** — uses CUDA for embeddings when available, falls back to CPU
 - **React + FastAPI web UI** — polished four-step wizard (Home → Configuration → Models → Documents → Chat) with a typed REST API, plus a CLI for scripted runs
-- **Evaluation framework** — retrieval metrics (Precision@k, Recall@k, MRR) and generation metrics (ROUGE-L, BERTScore), with a benchmark runner driven by a JSON test suite
 
 ## Architecture
 
@@ -136,8 +135,8 @@ backends or models.
 
 ## CLI
 
-The same pipeline is scriptable through a CLI for batch ingest /
-query / evaluation. All examples assume your virtualenv is active.
+The same pipeline is scriptable through a CLI for batch ingest and
+query. All examples assume your virtualenv is active.
 
 ### Chroma (vector) backend
 
@@ -216,38 +215,6 @@ MATCH (n)-[r]-(m) RETURN n, r, m
 
 Drag nodes to rearrange, double-click to expand neighbors, scroll to zoom. For larger graphs add `LIMIT 500` at the end to keep the renderer snappy.
 
-### Evaluate
-
-Run a benchmark JSON file end-to-end through the pipeline and print
-per-question + aggregate Precision@k / Recall@k / MRR / ROUGE-L /
-BERTScore:
-
-```bash
-# Ingest first if you haven't
-python -m rag_brain --backend vector --ingest path/to/document.pdf
-
-# Run the benchmark (template is in eval/benchmark.example.json)
-python -m rag_brain --backend vector \
-    --evaluate eval/benchmark.example.json \
-    --evaluate-out eval/results.json
-```
-
-Or use the evaluation module programmatically:
-
-```python
-from rag_brain.evaluation import evaluate
-
-result = evaluate(
-    question="What is RAG?",
-    prediction="RAG combines retrieval with generation...",
-    reference="RAG is a technique that augments LLM generation with retrieved documents.",
-    retrieved_sources=["paper.pdf", "notes.pdf"],
-    relevant_sources=["paper.pdf"],
-)
-print(result.retrieval)   # Precision@k, Recall@k, MRR
-print(result.generation)  # ROUGE-L, BERTScore
-```
-
 ## CLI Reference
 
 ```
@@ -260,8 +227,6 @@ Options:
   --chunking {fixed,semantic}     Chunking strategy (default: fixed)
   --no-recreate                   Add to existing collection instead of rebuilding
   --show-chunks                   Print retrieved chunks as JSON after the answer
-  --evaluate BENCHMARK_JSON       Run a JSON benchmark and print metrics table
-  --evaluate-out RESULTS_JSON     Write full benchmark results to a JSON file
 ```
 
 ## Configuration
@@ -299,15 +264,13 @@ rag-openllms/
 ├── .env                        # Environment-specific configuration
 ├── start_dev.ps1               # PowerShell launcher (FastAPI + Vite)
 ├── requirements.txt            # Python dependencies
-├── eval/                       # Benchmark templates and runner output
 ├── rag_brain/                  # Core RAG package
 │   ├── __init__.py             # Package exports + HF log suppression
 │   ├── __main__.py             # CLI entry point
 │   ├── config.py               # Settings (Pydantic) + enums
 │   ├── ingestion.py            # PDF/DOCX loading + chunking
 │   ├── embeddings.py           # Embedding model init (GPU auto-detect)
-│   ├── pipeline.py             # RAGPipeline: ingest, retrieve, rerank, query
-│   └── evaluation.py           # Retrieval + generation metrics + benchmark runner
+│   └── pipeline.py             # RAGPipeline: ingest, retrieve, rerank, query
 ├── api/                        # FastAPI backend for the web UI
 │   ├── main.py                 # Routes (/api/config, /api/ingest, /api/query, …)
 │   ├── state.py                # Process-level pipeline singleton
@@ -335,4 +298,4 @@ rag-openllms/
 - **Ollama** — local LLM inference (Llama 3, Mistral, etc.)
 - **HuggingFace Transformers** — direct model loading (Qwen, Gemma, Falcon, etc.) via `ChatHuggingFace`
 - **PyPDF / python-docx** — document processing
-- **ROUGE-score / BERTScore** — evaluation metrics
+- **FastAPI / React / Vite / Tailwind** — web UI
