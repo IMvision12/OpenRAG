@@ -182,7 +182,7 @@ def query_endpoint(req: QueryRequest) -> QueryResponse:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    out: dict[str, Any] = pipe.query(q)
+    out: dict[str, Any] = pipe.query(q, use_rag=req.use_rag)
     chunks = [
         RetrievedChunk(content=r["content"], metadata=r.get("metadata", {}))
         for r in out.get("retrieved", []) or []
@@ -192,6 +192,7 @@ def query_endpoint(req: QueryRequest) -> QueryResponse:
         mode=out.get("mode", "chat"),
         top_score=float(out.get("top_score", 0.0)),
         reranker_used=bool(out.get("reranker_used", False)),
+        graph_backend_used=bool(out.get("graph_backend_used", False)),
         extracted_entities=[
             str(e) for e in (out.get("extracted_entities") or [])
         ],

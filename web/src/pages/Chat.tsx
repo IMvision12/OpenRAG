@@ -29,10 +29,15 @@ interface ChatMessage {
 export function ChatPage({ onBack }: { onBack: () => void }) {
   const [history, setHistory] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
+  // Sticky toggle for the next send. Default OFF: the LLM answers
+  // directly. Flip ON ("Answer from documents") to retrieve+rerank+cite
+  // for that send onward, until toggled off again.
+  const [useRag, setUseRag] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
 
   const ask = useMutation({
-    mutationFn: (q: string) => api.query(q),
+    mutationFn: ({ q, rag }: { q: string; rag: boolean }) =>
+      api.query(q, rag),
     onSuccess: (data) => {
       setHistory((h) => [
         ...h,
@@ -56,7 +61,7 @@ export function ChatPage({ onBack }: { onBack: () => void }) {
     if (!q || ask.isPending) return;
     setInput("");
     setHistory((h) => [...h, { role: "user", text: q }]);
-    ask.mutate(q);
+    ask.mutate({ q, rag: useRag });
   }
 
   return (
@@ -67,7 +72,7 @@ export function ChatPage({ onBack }: { onBack: () => void }) {
       <PageHeader
         step={4}
         title="Chat"
-        description="Ask questions about your ingested documents. Answers cite chunk numbers in RAG mode and switch to chat mode when no chunk is relevant enough."
+        description='Ask anything. Toggle "Answer from documents" next to send to ground the next message in your ingested files (with citations); leave it off to chat directly with the LLM.'
       />
 
       <div className="flex-1 space-y-4 mb-4">
@@ -114,11 +119,37 @@ export function ChatPage({ onBack }: { onBack: () => void }) {
                 send();
               }
             }}
-            placeholder="Ask anything about your documents…"
+            placeholder={
+              useRag
+                ? "Ask about your documents…"
+                : "Chat directly with the LLM…"
+            }
             rows={1}
             className="flex-1 bg-transparent border-none px-3 py-2.5 text-sm resize-none focus:outline-none placeholder:text-muted"
             style={{ minHeight: "44px", maxHeight: "200px" }}
           />
+          <button
+            type="button"
+            onClick={() => setUseRag((v) => !v)}
+            aria-pressed={useRag}
+            title={
+              useRag
+                ? "Answering from documents — click to switch to direct LLM"
+                : "Direct LLM — click to answer from documents"
+            }
+            className={[
+              "inline-flex items-center gap-1.5 rounded-[10px] px-3 py-2.5",
+              "text-xs font-semibold transition-all border",
+              useRag
+                ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25"
+                : "bg-surface-2 border-border text-muted hover:text-text hover:border-border-hover",
+            ].join(" ")}
+          >
+            <BookOpen size={14} />
+            <span className="hidden sm:inline">
+              {useRag ? "Docs" : "Use docs"}
+            </span>
+          </button>
           <button
             type="button"
             onClick={() => send()}
@@ -221,14 +252,18 @@ function Bubble({ message }: { message: ChatMessage }) {
                 )}
                 {meta.mode === "rag" ? "RAG mode" : "Chat mode"}
               </span>
-              <span className="text-muted">
-                top relevance{" "}
-                <span className="font-mono text-text">
-                  {meta.top_score.toFixed(2)}
-                </span>
-              </span>
-              {meta.reranker_used && (
-                <span className="text-muted">· reranker</span>
+              {meta.mode === "rag" && (
+                <>
+                  <span className="text-muted">
+                    top relevance{" "}
+                    <span className="font-mono text-text">
+                      {meta.top_score.toFixed(2)}
+                    </span>
+                  </span>
+                  {meta.reranker_used && (
+                    <span className="text-muted">· reranker</span>
+                  )}
+                </>
               )}
             </div>
             {meta.warnings.length > 0 && (
@@ -289,7 +324,8 @@ function Bubble({ message }: { message: ChatMessage }) {
                       chunksOpen ? "" : "-rotate-90"
                     }`}
                   />
-                  Retrieved chunks ({meta.retrieved.length})
+                  {meta.graph_backend_used ? "Graph-matched" : "Retrieved"}{" "}
+                  chunks ({meta.retrieved.length})
                 </summary>
                 <div className="mt-3 space-y-2">
                   {meta.retrieved.map((c, i) => {
@@ -307,7 +343,7 @@ function Bubble({ message }: { message: ChatMessage }) {
                           </span>
                           <span className="truncate">{src}</span>
                           {page !== undefined && page !== "" && (
-                            <span>· page {page}</span>
+                            <span>· page {String(page)}</span>
                           )}
                         </div>
                         <div className="text-xs whitespace-pre-wrap leading-relaxed text-text/90">

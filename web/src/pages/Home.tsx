@@ -77,7 +77,7 @@ export function HomePage({ onStart }: { onStart: () => void }) {
             <ArrowRight size={18} />
           </button>
           <a
-            href="https://github.com/IMvision12"
+            href="https://github.com/IMvision12/rag-openllms"
             target="_blank"
             rel="noreferrer"
             className="btn-ghost inline-flex items-center gap-2 text-sm"

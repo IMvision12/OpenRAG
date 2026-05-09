@@ -66,6 +66,7 @@ class IngestSummary(BaseModel):
 
 class QueryRequest(BaseModel):
     question: str
+    use_rag: bool = False
 
 
 class RetrievedChunk(BaseModel):
@@ -78,6 +79,7 @@ class QueryResponse(BaseModel):
     mode: Literal["rag", "chat"]
     top_score: float
     reranker_used: bool = False
+    graph_backend_used: bool = False
     extracted_entities: list[str] = Field(default_factory=list)
     retrieved: list[RetrievedChunk] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

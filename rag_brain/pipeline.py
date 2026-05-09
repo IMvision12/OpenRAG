@@ -40,6 +40,14 @@ from rag_brain.ingestion import load_documents, split_documents
 
 log = logging.getLogger("rag_brain.pipeline")
 
+# Suppress the Neo4j driver's per-query "deprecation" notifications. The
+# offending Cypher (`apoc.create.addLabels(...)`) lives inside
+# langchain-neo4j's `add_graph_documents`, not our code, so we can't
+# rewrite it — but Neo4j 5.x emits a WARNING log line for *every*
+# execution, swamping useful output during ingest. ERROR-level cuts the
+# spam without hiding actual driver errors.
+logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
+
 
 def _rmtree_windows_safe(path: Path) -> None:
     """rmtree with retries — Windows file handles can release a beat later."""
@@ -219,17 +227,13 @@ _CHAT_SYSTEM_PROMPT = (
 # Cross-encoder reranker. Unlike bi-encoder cosine similarity (which drifts
 # with query length and phrasing — short queries against long chunks hover
 # at 0.1–0.3 even for highly relevant hits), cross-encoder scores are
-# calibrated: a fixed threshold reliably separates "this chunk answers
-# the question" from "it doesn't". This is the standard production
-# approach (LlamaIndex / LangChain / Haystack all recommend it).
+# calibrated for chunk relevance: a fixed threshold separates "this chunk
+# answers the question" from "it doesn't" reasonably well. Standard
+# production approach (LangChain / LlamaIndex / Haystack all recommend it).
 #
 # bge-reranker-base is a ~280 MB multilingual model. Scores are raw
-# logits; we apply sigmoid to land in [0, 1]. Threshold 0.3 is what
-# Cohere / BGE / ZeroEntropy reranker guides recommend as a usable "good
-# enough" cutoff for relevance — sigmoid(0) = 0.5 is already "likely
-# relevant"; below 0.3 is confidently irrelevant.
+# logits; we apply sigmoid to land in [0, 1].
 _RERANKER_MODEL = "BAAI/bge-reranker-base"
-_RERANK_SCORE_THRESHOLD = 0.3
 # Over-retrieve this many candidates from each backend before reranking.
 # The reranker is O(k) per query, so 20 is cheap and gives the reranker
 # enough recall even when the bi-encoder's top-k misses the best chunk.
@@ -248,6 +252,12 @@ _CHROMA_COLLECTION_META = {"hnsw:space": "cosine"}
 # without false-merging weakly related concepts. Tighten if you see bad
 # merges in the logs; loosen if too many obvious aliases stay separate.
 _ENTITY_MERGE_COSINE_THRESHOLD = 0.92
+
+# RAG / chat routing is no longer gated heuristically. The mode is set by
+# the caller (the React UI's "Answer from documents" toggle): when on, the
+# query goes through retrieve→rerank→cite; when off, the LLM answers
+# directly with no document context. Removes the auto-gate failure modes
+# (chitchat scoring above thresholds, real queries scoring below) entirely.
 
 
 def _sigmoid(x: float) -> float:
@@ -739,20 +749,44 @@ class RAGPipeline:
         word_sets = [set(_re.findall(r"\w+", i.lower())) for i in ids]
         lower_ids = [i.lower() for i in ids]
 
+        # Pure numeric strings ("3206", "46.2", "1.6T", "20%") have
+        # degenerate embeddings (numbers cluster heavily) AND are word-
+        # subsets of any longer entity whose name contains a digit. Both
+        # signals fire spuriously, so we skip these entirely.
+        _NUMERIC_RE = _re.compile(
+            r"[+\-]?\d+(?:[.,]\d+)?(?:[eE][+\-]?\d+)?[%TBMKtbmk]?"
+        )
+        is_numeric = [
+            bool(_NUMERIC_RE.fullmatch(i.strip())) for i in ids
+        ]
+
+        # URL / bare-domain detector. Catches "https://x.com/...", "x.com/...",
+        # "github.com/foo" — none of which should merge with bare names.
+        _DOMAIN_RE = _re.compile(
+            r"\.(com|org|io|net|gov|edu|co|ai|app|dev|me|ru|uk|de|jp|cn)(/|$)"
+        )
+
         def _is_url(s_lower: str) -> bool:
-            return s_lower.startswith(("http://", "https://")) or "://" in s_lower
+            if "://" in s_lower or s_lower.startswith(("http://", "https://")):
+                return True
+            return bool(_DOMAIN_RE.search(s_lower))
 
         def _word_subset_safe(a: int, b: int) -> bool:
-            """Conservative word-subset rule with three guards against the
-            false merges we saw in practice (URLs, form-field labels, and
-            wildly different specificity)."""
+            """Conservative word-subset rule with guards against the false
+            merges we've seen in practice (numbers, URLs, form-field
+            labels, and wildly different specificity)."""
+            # Numeric guard — pure numbers never merge with anything by
+            # word-subset; they cascade into anything that names a digit.
+            if is_numeric[a] or is_numeric[b]:
+                return False
             wa, wb = word_sets[a], word_sets[b]
             if not (wa and wb):
                 return False
             if not (wa <= wb or wb <= wa):
                 return False
-            # URL guard — "Fbi" must NOT merge into "https://www.fbi.gov/...".
-            # Treat URLs as unique atoms.
+            # URL guard — "Fbi" must NOT merge into "https://www.fbi.gov/..."
+            # or "github" into "github.com/foo". Treat URLs/domains as
+            # unique atoms.
             if _is_url(lower_ids[a]) != _is_url(lower_ids[b]):
                 return False
             # Form-field guard — "Sex" vs "Sex: (Check One)" are a real entity
@@ -769,7 +803,14 @@ class RAGPipeline:
             return True
 
         for i in range(n):
+            # Skip pure numbers entirely, even from cosine pass — embeddings
+            # of bare numerals cluster degenerately and produce spurious
+            # number-to-number merges (e.g. '3206' → '-3206', '46.2' → '46.5').
+            if is_numeric[i]:
+                continue
             for j in range(i + 1, n):
+                if is_numeric[j]:
+                    continue
                 if _word_subset_safe(i, j) or sim[i, j] >= _ENTITY_MERGE_COSINE_THRESHOLD:
                     union(i, j)
 
@@ -1271,25 +1312,28 @@ class RAGPipeline:
 
     # ── Query ──────────────────────────────────────────────────────────
 
-    def query(self, question: str) -> dict[str, Any]:
-        """Retrieve + rerank + threshold on calibrated reranker score.
+    def query(self, question: str, *, use_rag: bool = False) -> dict[str, Any]:
+        """Answer a question, routing on the caller-supplied flag.
 
-        Standard industry pattern (LangChain / LlamaIndex / Haystack all
-        recommend it): cross-encoder scores are calibrated, so a fixed
-        threshold on the top reranked chunk reliably tells us whether the
-        question is actually answerable from the docs.
+        - use_rag=True  → retrieve from the configured backend, rerank,
+          inject the top chunks into the LLM prompt, return citations.
+        - use_rag=False → skip retrieval entirely; the LLM answers from
+          its general knowledge with no document context and no citations.
 
-        - top_score >= _RERANK_SCORE_THRESHOLD → RAG mode (strict prompt,
-          cite chunk numbers)
-        - top_score <  _RERANK_SCORE_THRESHOLD → chat mode (answer from
-          general knowledge, no citations, no doc context passed to LLM)
+        The decision is the caller's; nothing here inspects the question.
         """
         # Reset per-query diagnostics so the UI never shows stale info.
         self.last_extracted_entities: list[str] = []
-        scored = self._retrieve_scored(question)
-        top_score = scored[0][1] if scored else 0.0
-        docs = [d for d, _ in scored]
-        use_rag = bool(docs) and top_score >= _RERANK_SCORE_THRESHOLD
+
+        if use_rag:
+            scored = self._retrieve_scored(question)
+            docs = [d for d, _ in scored]
+            top_score = scored[0][1] if scored else 0.0
+        else:
+            scored = []
+            docs = []
+            top_score = 0.0
+
         log.info(
             "query: q=%r → mode=%s top_score=%.3f docs=%d",
             question, "rag" if use_rag else "chat", top_score, len(docs),
@@ -1384,6 +1428,12 @@ def run_cli() -> None:
         action="store_true",
         help="Print retrieved chunks as JSON after the answer.",
     )
+    parser.add_argument(
+        "--rag",
+        action="store_true",
+        help="Answer from documents (retrieve + rerank + cite). "
+             "Default: ask the LLM directly with no retrieval.",
+    )
     args = parser.parse_args()
 
     os.environ["RAG_BACKEND"] = args.backend
@@ -1395,7 +1445,7 @@ def run_cli() -> None:
         print(f"Ingested {n} chunks into backend={args.backend} (chunking={args.chunking}).")
 
     if args.query:
-        out = pipe.query(args.query)
+        out = pipe.query(args.query, use_rag=args.rag)
         print(out["answer"])
         if args.show_chunks:
             print("\n--- retrieved chunks ---")
