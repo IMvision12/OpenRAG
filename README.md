@@ -1,19 +1,42 @@
-# RAG OpenLLMs
+<p align="center">
+  <h1 align="center">OpenRAG</h1>
+  <p align="center">
+    <strong>Open-source Retrieval-Augmented Generation with dual vector + knowledge-graph backends</strong>
+  </p>
+  <p align="center">
+    <code>Chroma</code> · <code>Neo4j</code> · <code>Ollama</code> · <code>HuggingFace</code> · <code>LangChain</code> · <code>FastAPI</code> · <code>React</code>
+  </p>
+</p>
 
-Retrieval-Augmented Generation framework using open-source Large Language Models.
+---
 
-Built as a master's project for CPSC 597 at California State University, Fullerton.
+## Overview
 
-## Features
+**OpenRAG** is a production-ready RAG framework that lets you ingest documents, build retrievable knowledge stores, and query them with open-source LLMs, all running locally on your own hardware. No API keys for proprietary models required.
 
-- **Choose your backend** — Chroma (vector DB) for similarity search, or Neo4j (graph DB) for pure knowledge-graph traversal
-- **Knowledge-graph construction** — `LLMGraphTransformer` extracts entities and typed relationships from each chunk; Neo4j becomes a connected graph rather than flat storage
-- **Cross-encoder reranking + mode gating** — BAAI/bge-reranker-base rescores candidates after bi-encoder retrieval, and the calibrated top score gates between strict RAG mode (cite chunks) and free-form chat mode (no fabricated citations)
-- **Multi-format ingestion** — PDF and DOCX with metadata preservation
-- **Multiple chunking strategies** — fixed-size or embedding-based semantic (via `SemanticChunker`)
-- **Open-source LLMs** — local inference via Ollama (Llama 3, Mistral, etc.) or HuggingFace Transformers (Qwen, Gemma, Falcon, etc.); the graph-extraction LLM is configured separately and can be a smaller/faster model
-- **GPU auto-detection** — uses CUDA for embeddings when available, falls back to CPU
-- **React + FastAPI web UI** — polished four-step wizard (Home → Configuration → Models → Documents → Chat) with a typed REST API, plus a CLI for scripted runs
+Choose between two retrieval backends at configuration time:
+
+| Backend | How it works | Best for |
+|---|---|---|
+| **Chroma** (vector) | Bi-encoder embeddings → cosine similarity search | Fast similarity retrieval, general Q&A |
+| **Neo4j** (graph) | LLM-extracted entities & relationships → Cypher graph traversal | Relational queries, entity-centric exploration |
+
+Both paths feed into a **cross-encoder reranker** (`BAAI/bge-reranker-base`) that re-scores candidates for calibrated relevance before the answer LLM generates a cited response.
+
+## Key Features
+
+- **Dual retrieval backends:** Chroma (vector DB) for similarity search, or Neo4j (graph DB) for pure knowledge-graph traversal
+- **Knowledge-graph construction:** `LLMGraphTransformer` extracts entities and typed relationships from each chunk; automatic entity deduplication via embedding similarity + word-subset matching
+- **Two-stage retrieval:** over-retrieve candidates from the backend, then cross-encoder rerank (`BAAI/bge-reranker-base`) for calibrated relevance scoring
+- **Multi-format ingestion:** PDF and DOCX with metadata preservation
+- **Flexible chunking:** fixed-size (`RecursiveCharacterTextSplitter`) or embedding-based semantic splitting (`SemanticChunker`)
+- **Open-source LLMs:** local inference via Ollama (Llama 3, Mistral, Gemma, etc.) or HuggingFace Transformers (Qwen, Gemma, Falcon, etc.); cloud-hosted Ollama models also supported
+- **Separate graph-extraction LLM:** configure a different (smaller/faster) model for knowledge-graph construction
+- **GPU auto-detection:** CUDA for embeddings and inference when available, seamless CPU fallback
+- **Full-stack web UI:** React + TypeScript + Tailwind wizard interface with a typed REST API
+- **CLI interface:** scriptable batch ingest and query for automation workflows
+- **Live model warmup:** background LLM download with byte-level progress tracking
+- **HuggingFace cache management:** inspect and clear downloaded models from the UI
 
 ## Architecture
 
@@ -35,29 +58,28 @@ Document Loader ──► Text Chunking ───────────► Emb
                               (BAAI/bge-reranker-base)
                                         │
                                         ▼
-                              Mode gate (top score ≥ τ)
-                                        │
-                                        ▼
                                 LLM Generation
-                         (Ollama / HuggingFace — local)
+                         (Ollama / HuggingFace - local)
                                         │
                                         ▼
                               Answer with citations
 ```
 
-## Quickstart
+## Getting Started
 
 ### Prerequisites
 
-- **Python 3.10+** with `pip`
-- **Node.js 18+** with `npm` (for the web UI)
-- **Neo4j 5.x with the APOC plugin installed** — only required if you'll use the `neo4j` backend. APOC is needed for `LLMGraphTransformer` writes.
-- **Ollama** — only required if `LLM_PROVIDER=ollama` is selected. Either install it locally or use the cloud-hosted models (e.g. `gpt-oss:20b-cloud`) with a signed-in account.
+| Dependency | Required | Notes |
+|---|---|---|
+| **Python 3.10+** | Always | With `pip` |
+| **Node.js 18+** | Always | With `npm` (for the web UI) |
+| **Neo4j 5.x + APOC** | Graph backend only | APOC plugin needed for `LLMGraphTransformer` writes |
+| **Ollama** | If using Ollama provider | Install locally or use cloud-hosted models (`:cloud` suffix) |
 
 ### 1. Install Python dependencies
 
 ```bash
-cd rag-openllms
+cd OpenRAG
 pip install -r requirements.txt
 ```
 
@@ -71,8 +93,7 @@ cd ..
 
 ### 3. Configure environment
 
-Edit `.env` in the project root. The only values that *have* to be
-set are Neo4j credentials when using the `neo4j` backend:
+Create a `.env` file in the project root. The only values required upfront are Neo4j credentials (when using the `neo4j` backend):
 
 ```bash
 NEO4J_URI=bolt://localhost:7687
@@ -80,128 +101,108 @@ NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=your_password   # required when backend = neo4j
 ```
 
-Everything else (backend, chunking, models, API keys for graph LLMs)
-is picked through the web UI at runtime.
+All other settings (backend, chunking, models) are configured through the web UI at runtime.
 
-### 4. Start the app
+### 4. Start the application
 
-**Easiest — Windows PowerShell launcher (starts both servers):**
+**Option A - PowerShell launcher (recommended on Windows):**
 
 ```powershell
 ./start_dev.ps1
 ```
 
-Then open **<http://localhost:5173/>** in your browser. Click "Let's
-get started" on the Home screen and walk through the four steps.
-
-**Manual — two terminals:**
+**Option B - Manual (two terminals):**
 
 ```bash
-# Terminal 1 — FastAPI backend on :8000
+# Terminal 1 - FastAPI backend on :8000
 python -m uvicorn api.main:app --reload --port 8000
 
-# Terminal 2 — Vite dev server on :5173 (proxies /api/* → :8000)
+# Terminal 2 - Vite dev server on :5173 (proxies /api/* to :8000)
 cd web
 npm run dev
 ```
 
-Open <http://localhost:5173/> in your browser.
+Open **http://localhost:5173/** in your browser and walk through the four-step wizard.
 
-### 5. Production deployment (single process)
+### 5. Production deployment
 
-Build the frontend once, then run only the FastAPI backend — it
-serves the built bundle from `web/dist/` automatically:
+Build the frontend once, then serve everything from the FastAPI backend:
 
 ```bash
 cd web && npm run build && cd ..
 python -m uvicorn api.main:app --port 8000
 ```
 
-Open <http://localhost:8000/> in your browser.
+Access at **http://localhost:8000/**.
 
 ## Usage
 
-The four-step wizard walks you through everything from the browser:
+The web UI guides you through a four-step wizard:
 
-1. **Home** — overview, click *Let's get started*.
-2. **Configuration** — pick the retrieval backend (`vector` or
-   `neo4j`), chunking strategy, top-k.
-3. **Models** — embedding model, answer LLM (Ollama or HuggingFace),
-   and (for `neo4j`) the graph-extraction LLM.
-4. **Documents** — upload PDFs / DOCXs and ingest into the
-   configured stores.
-5. **Chat** — ask questions; answers cite chunk numbers in RAG mode
-   or fall back to chat mode when no chunk is relevant enough.
+| Step | Page | What you do |
+|---|---|---|
+| 1 | **Configuration** | Select retrieval backend (`vector` or `neo4j`), chunking strategy, top-k |
+| 2 | **Models** | Choose embedding model, answer LLM (Ollama / HuggingFace), and graph-extraction LLM |
+| 3 | **Documents** | Upload PDF / DOCX files and ingest into the configured stores |
+| 4 | **Chat** | Ask questions with RAG-cited answers or free-form chat mode |
 
-The Reset button (top-right) wipes all selections, uploaded files,
-chat history, and the cached pipeline — useful when switching
-backends or models.
+The **Reset** button (top-right) wipes all selections, uploaded files, chat history, and the cached pipeline.
 
 ## CLI
 
-The same pipeline is scriptable through a CLI for batch ingest and
-query. All examples assume your virtualenv is active.
+The full pipeline is scriptable for batch workflows. All examples assume your virtual environment is active.
 
 ### Chroma (vector) backend
 
 ```bash
-# Ingest a PDF
+# Ingest documents
 python -m rag_brain --backend vector --ingest "document.pdf"
-
-# Ingest a DOCX
 python -m rag_brain --backend vector --ingest "report.docx"
-
-# Ingest with semantic chunking
 python -m rag_brain --backend vector --ingest "document.pdf" --chunking semantic
 
-# Append to existing collection instead of rebuilding
+# Append to existing collection
 python -m rag_brain --backend vector --ingest "document.pdf" --no-recreate
 
 # Query
-python -m rag_brain --backend vector --query "What are the key findings?"
-
-# Query with retrieved chunks visible
-python -m rag_brain --backend vector --query "What are the key findings?" --show-chunks
+python -m rag_brain --backend vector --query "What are the key findings?" --rag
+python -m rag_brain --backend vector --query "What are the key findings?" --rag --show-chunks
 ```
 
 ### Neo4j (graph) backend
 
 ```bash
-# Ingest a PDF
+# Ingest documents
 python -m rag_brain --backend neo4j --ingest "document.pdf"
-
-# Ingest a DOCX
 python -m rag_brain --backend neo4j --ingest "report.docx"
-
-# Ingest with semantic chunking
 python -m rag_brain --backend neo4j --ingest "document.pdf" --chunking semantic
 
-# Append to existing index instead of rebuilding
+# Append to existing index
 python -m rag_brain --backend neo4j --ingest "document.pdf" --no-recreate
 
 # Query
-python -m rag_brain --backend neo4j --query "What are the key findings?"
-
-# Query with retrieved chunks visible
-python -m rag_brain --backend neo4j --query "What are the key findings?" --show-chunks
+python -m rag_brain --backend neo4j --query "What are the key findings?" --rag
+python -m rag_brain --backend neo4j --query "What are the key findings?" --rag --show-chunks
 ```
-
 
 ### Explore the knowledge graph
 
 After ingesting with the `neo4j` backend, browse the extracted entity-relation graph in **Neo4j Browser**:
 
-🔗 **[http://localhost:7474](http://localhost:7474)** (default Neo4j HTTP port — same machine as the bolt URL in `.env`)
+🔗 **[http://localhost:7474](http://localhost:7474)**
 
-Log in with your `NEO4J_USERNAME` / `NEO4J_PASSWORD`, then paste this into the query bar to see the whole graph with all connections:
+Log in with your `NEO4J_USERNAME` / `NEO4J_PASSWORD`, then run:
 
 ```cypher
 MATCH (n)-[r]-(m) RETURN n, r, m
 ```
 
-Drag nodes to rearrange, double-click to expand neighbors, scroll to zoom. For larger graphs add `LIMIT 500` at the end to keep the renderer snappy.
+For larger graphs, append `LIMIT 500` to keep the renderer responsive.
 
-## CLI Reference
+<p align="center">
+  <img src="docs/assets/neo4j-graph.png" alt="Neo4j knowledge graph extracted from ingested documents, visualized in Neo4j Desktop Studio" width="800" />
+</p>
+
+### CLI Reference
 
 ```
 python -m rag_brain [OPTIONS]
@@ -213,11 +214,32 @@ Options:
   --chunking {fixed,semantic}     Chunking strategy (default: fixed)
   --no-recreate                   Add to existing collection instead of rebuilding
   --show-chunks                   Print retrieved chunks as JSON after the answer
+  --rag                           Answer from documents (retrieve + rerank + cite)
 ```
 
-## Configuration
+## API Reference
 
-All settings are read from `.env` in the project root:
+The FastAPI backend exposes a typed REST API. All endpoints are prefixed with `/api`.
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/health` | `GET` | Health check |
+| `/api/presets` | `GET` | Available embedding and LLM model presets |
+| `/api/config` | `GET` | Current pipeline configuration |
+| `/api/config` | `PUT` | Update pipeline configuration |
+| `/api/reset` | `POST` | Reset all state (config, pipeline, ingested files) |
+| `/api/warmup` | `POST` | Start background LLM download/load |
+| `/api/warmup/status` | `GET` | Live download progress (poll every ~250ms) |
+| `/api/ingest` | `POST` | Upload and ingest PDF/DOCX files |
+| `/api/query` | `POST` | Ask a question (RAG or chat mode) |
+| `/api/debug/graph` | `GET` | Inspect Neo4j graph (entity counts, sample entities) |
+| `/api/cache/hf` | `GET` | List HuggingFace cached models |
+| `/api/cache/hf` | `DELETE` | Clear all HuggingFace cache |
+| `/api/cache/hf/{repo_id}` | `DELETE` | Remove a specific cached model |
+
+## Configuration Reference
+
+All settings are read from `.env` in the project root. Values set through the web UI override these defaults at runtime.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -238,15 +260,15 @@ All settings are read from `.env` in the project root:
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama API URL |
 | `OLLAMA_MODEL` | `llama3` | Answer LLM (Ollama model name) |
 | `HF_MODEL` | `Qwen/Qwen2.5-1.5B-Instruct` | Answer LLM (HuggingFace model ID) |
-| `HF_TOKEN` | _(empty)_ | Optional HF token for gated repos; never written to disk |
-| `GRAPH_LLM_PROVIDER` | `none` | `none`, `ollama`, or `huggingface` (used only with the `neo4j` backend) |
-| `GRAPH_LLM_MODEL` | _(empty)_ | Model name for the chosen graph-LLM provider |
+| `HF_TOKEN` | _(empty)_ | Optional HF token for gated repos |
+| `GRAPH_LLM_PROVIDER` | `none` | `none`, `ollama`, or `huggingface` |
+| `GRAPH_LLM_MODEL` | _(empty)_ | Model name for graph-extraction LLM |
 | `GRAPH_LLM_WORKERS` | `1` | Parallel chunks during graph extraction |
 
 ## Project Structure
 
 ```
-rag-openllms/
+OpenRAG/
 ├── .env                        # Environment-specific configuration
 ├── start_dev.ps1               # PowerShell launcher (FastAPI + Vite)
 ├── requirements.txt            # Python dependencies
@@ -257,11 +279,12 @@ rag-openllms/
 │   ├── ingestion.py            # PDF/DOCX loading + chunking
 │   ├── embeddings.py           # Embedding model init (GPU auto-detect)
 │   └── pipeline.py             # RAGPipeline: ingest, retrieve, rerank, query
-├── api/                        # FastAPI backend for the web UI
-│   ├── main.py                 # Routes (/api/config, /api/ingest, /api/query, …)
+├── api/                        # FastAPI backend
+│   ├── main.py                 # REST API routes
 │   ├── state.py                # Process-level pipeline singleton
-│   ├── schemas.py              # Pydantic request/response shapes
-│   └── presets.py              # Embedding / LLM model preset lists
+│   ├── schemas.py              # Pydantic request/response models
+│   ├── presets.py              # Embedding / LLM model preset lists
+│   └── warmup.py               # Background model download with progress
 └── web/                        # React frontend (Vite + TypeScript + Tailwind)
     ├── index.html
     ├── package.json
@@ -277,11 +300,19 @@ rag-openllms/
 
 ## Tech Stack
 
-- **LangChain + LangChain Experimental** — orchestration framework + `SemanticChunker`
-- **ChromaDB** — local vector database
-- **Neo4j** — graph database with vector index
-- **Sentence Transformers** — embedding models (MiniLM, MPNet, BGE)
-- **Ollama** — local LLM inference (Llama 3, Mistral, etc.)
-- **HuggingFace Transformers** — direct model loading (Qwen, Gemma, Falcon, etc.) via `ChatHuggingFace`
-- **PyPDF / python-docx** — document processing
-- **FastAPI / React / Vite / Tailwind** — web UI
+| Category | Technologies |
+|---|---|
+| **Orchestration** | LangChain, LangChain Experimental |
+| **Vector Database** | ChromaDB |
+| **Graph Database** | Neo4j + APOC |
+| **Embeddings** | Sentence Transformers (MiniLM, MPNet, BGE, E5) |
+| **Reranking** | BAAI/bge-reranker-base |
+| **LLM Inference** | Ollama, HuggingFace Transformers |
+| **Document Processing** | PyPDF, python-docx |
+| **Backend** | FastAPI, Uvicorn |
+| **Frontend** | React, Vite, TypeScript, TailwindCSS |
+| **Configuration** | Pydantic Settings, python-dotenv |
+
+## License
+
+This project is open-source. See the [LICENSE](LICENSE) file for details.
