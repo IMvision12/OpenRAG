@@ -199,7 +199,7 @@ MATCH (n)-[r]-(m) RETURN n, r, m
 For larger graphs, append `LIMIT 500` to keep the renderer responsive.
 
 <p align="center">
-  <img src="docs/assets/neo4j-graph.png" alt="Neo4j knowledge graph extracted from ingested documents, visualized in Neo4j Desktop Studio" width="800" />
+  <img src="assets/graph.png" alt="Neo4j knowledge graph extracted from ingested documents, visualized in Neo4j Desktop Studio" width="800" />
 </p>
 
 ### CLI Reference
